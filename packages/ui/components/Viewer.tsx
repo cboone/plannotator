@@ -39,7 +39,7 @@ import { FloatingQuickLabelPicker } from './FloatingQuickLabelPicker';
  */
 const MermaidBlock = lazy(async () => ({ default: (await import('./MermaidBlock')).MermaidBlock }));
 const GraphvizBlock = lazy(async () => ({ default: (await import('./GraphvizBlock')).GraphvizBlock }));
-/** ```html and ```svg fences drawn, for a host that opts in (`htmlEmbeds`); loaded only then. */
+/** Opt-in HTML documents and SVG images, loaded only when rendered. */
 const HtmlEmbedBlock = lazy(async () => ({ default: (await import('./html-embed/HtmlEmbedBlock')).HtmlEmbedBlock }));
 const SvgFenceBlock = lazy(async () => ({ default: (await import('./html-embed/SvgFenceBlock')).SvgFenceBlock }));
 /**
@@ -391,10 +391,12 @@ export interface ViewerProps {
    * Opt-in host capability (approval "inbox-inline-html"): a host that serves
    * embed documents (see `HtmlEmbedHost`, @plannotator/core/html-embed) draws
    * a ```html fence as a live, sandboxed page and a ```svg fence as an
-   * image, each with a Code button for the source. Absent → both stay code,
-   * unchanged (plan review, annotate and code review pass nothing).
+   * image, each with a Code button for the source. Absent → HTML stays code;
+   * SVG stays code unless `renderSvgFences` is enabled.
    */
   htmlEmbeds?: HtmlEmbedHost;
+  /** Render SVG fences as images without an HTML host. Default false. */
+  renderSvgFences?: boolean;
   /**
    * Opt-in host capability, with `answerOnly`: the reader may comment on the
    * text. A text selection opens the selection toolbar, comment-only
@@ -847,6 +849,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   readOnly = false,
   answerOnly = false,
   htmlEmbeds,
+  renderSvgFences = false,
   textComments = false,
   suggestComment,
   vimModeEnabled = false,
@@ -1821,7 +1824,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
                 <HtmlEmbedBlock block={group.block} host={htmlEmbeds} />
               </Suspense>
             </LazyBlockBoundary>
-          ) : htmlEmbeds && group.block.type === 'code' && isSvgFenceLanguage(group.block.language) ? (
+          ) : (htmlEmbeds || renderSvgFences) && group.block.type === 'code' && isSvgFenceLanguage(group.block.language) ? (
             <LazyBlockBoundary key={group.block.id} fallback={embedFallback(group.block)}>
               <Suspense fallback={<CodeBlock block={group.block} isHovered={false} />}>
                 <SvgFenceBlock block={group.block} />
