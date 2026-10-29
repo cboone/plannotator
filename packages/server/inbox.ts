@@ -37,6 +37,7 @@
  * No CORS headers anywhere, so another site cannot read an answer.
  */
 
+import { INSTALLER_UPDATES_DISABLED, UPDATE_INSTALLATION_DISABLED_MESSAGE } from "./update-policy";
 import { existsSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -1582,7 +1583,7 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
     const config = loadConfig();
     return {
       update_check: { on: resolveUpdateCheck(config), env: parseUpdateCheckEnv() ?? null },
-      auto_update: { on: resolveAutoUpdate(config), env: parseAutoUpdateEnv() ?? null },
+      auto_update: { on: !INSTALLER_UPDATES_DISABLED && resolveAutoUpdate(config), env: parseAutoUpdateEnv() ?? null },
     };
   };
 
@@ -2655,6 +2656,7 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
           const result = updates.updateNow();
           if (result.outcome === "launched") return json({ ok: true, version: result.version, update: updates.current() });
           const refused: Record<string, string> = {
+            disabled: UPDATE_INSTALLATION_DISABLED_MESSAGE,
             locked: "An update is already running.",
             unmanaged: "This copy of Plannotator was not installed by the install script, so it can't update itself.",
             "dev-build": "This is a development build; there is nothing to update.",

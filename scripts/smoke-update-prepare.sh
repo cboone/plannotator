@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Smoke test for safe updates (step 1) against a COMPILED binary, run by
-# release.yml's smoke-binaries job on the artifacts it built.
+# Verify installer staging and execution against a compiled binary.
 #
-#   scripts/smoke-update-prepare.sh <path-to-plannotator-binary>
+#   scripts/smoke-update-prepare.sh <path-to-plannotator-binary> [--installer-updates-disabled]
+#
+# With --installer-updates-disabled, verify refusal without mirror requests.
+# Otherwise, run the staging and installer checks below.
 #
 # 1. `<binary> update-prepare v999.0.0` against a loopback mirror prints
 #    exactly one line, the staged plannotator-update-* dir, holding the script
@@ -21,6 +23,10 @@ set -euo pipefail
 
 BINARY="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
 [ -x "$BINARY" ] || { echo "FAIL: $BINARY is not executable" >&2; exit 1; }
+
+if [[ "${2:-}" == "--installer-updates-disabled" ]]; then
+  exec node "$(dirname "${BASH_SOURCE[0]}")/smoke-update-policy.mjs" "${BINARY}"
+fi
 
 case "$(uname -s)" in Darwin) os=darwin ;; *) os=linux ;; esac
 case "$(uname -m)" in x86_64|amd64) arch=x64 ;; *) arch=arm64 ;; esac
@@ -112,6 +118,8 @@ cat "$work/update.out"
 grep -q "Updated to 999.0.0" "$work/update.out" || { echo "FAIL: no 'Updated to 999.0.0'" >&2; exit 1; }
 grep -qx -- "v999.0.0" "$work/home/installer-args" || { echo "FAIL: the stand-in installer did not get --version v999.0.0" >&2; exit 1; }
 grep -q "${native}=${pin}" "$work/home/installer-pins" || { echo "FAIL: the installer did not get PLANNOTATOR_EXPECTED_SHA256 with ${native}" >&2; exit 1; }
-if ls "$work/tmp" | grep -q '^plannotator-update-'; then echo "FAIL: the staged dir was left behind" >&2; exit 1; fi
+for staged_path in "${work}/tmp"/plannotator-update-*; do
+  [[ ! -e "${staged_path}" ]] || { echo "FAIL: the staged dir was left behind" >&2; exit 1; }
+done
 [ ! -e "$work/data/update.lock" ] || { echo "FAIL: update.lock left behind" >&2; exit 1; }
 echo "OK: plannotator update ran update-prepare from the compiled binary and passed the pin to the installer"

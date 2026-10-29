@@ -97,7 +97,6 @@ import {
 import { runGuideCli } from "@plannotator/server/guide-cli";
 import { runUpdateCommand } from "./update-command";
 import { runUpdatePrepareCommand } from "@plannotator/server/update-prepare";
-import { takeUpdateHint } from "@plannotator/shared/update-check";
 import {
   startAnnotateServer as startAnnotateServerUnguarded,
   handleAnnotateServerReady,
@@ -170,7 +169,7 @@ import {
 } from "@plannotator/shared/prompts";
 import { buildReviewOutput, supportsReviewApprovalNotes } from "./review-output";
 import { registerSession, unregisterSession, listSessions, listInProcessSessions, type SessionInfo } from "@plannotator/server/sessions";
-import { enableAutoUpdateNotice, isManagedBinary, scheduleAutoUpdateCheck } from "@plannotator/server/auto-update";
+import { enableAutoUpdateNotice, isManagedBinary, scheduleAutoUpdateCheck, takeCliUpdateHint } from "@plannotator/server/auto-update";
 import { openBrowser } from "@plannotator/server/browser";
 import { inlineHtmlLocalAssets } from "@plannotator/server/html-assets";
 import { installAgentTerminalRuntime } from "@plannotator/server/agent-terminal-runtime";
@@ -821,7 +820,7 @@ process.on("exit", () => {
   if (rawArgs.includes("--json") || rawArgs.includes("--hook")) return;
   if (process.env.CLAUDECODE || process.env.PLANNOTATOR_SESSION_TAG) return;
   try {
-    const line = takeUpdateHint({
+    const line = takeCliUpdateHint({
       current: getCliVersion(),
       enabled: resolveUpdateCheck(loadConfig()),
       now: Date.now(),

@@ -35,6 +35,7 @@
  * the PowerShell wrapper's Invoke-WebRequest uses.
  */
 
+import { INSTALLER_UPDATES_DISABLED, UPDATE_INSTALLATION_DISABLED_MESSAGE } from "./update-policy";
 import { X509Certificate } from "node:crypto";
 import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -311,6 +312,7 @@ async function fetchText(
  * Download and stage. Never throws; on any failure nothing is left on disk.
  */
 export async function prepareUpdate(deps: PrepareDeps): Promise<PrepareResult> {
+  if (INSTALLER_UPDATES_DISABLED) return { ok: false, error: UPDATE_INSTALLATION_DISABLED_MESSAGE };
   const env = deps.env ?? process.env;
   const f = deps.fetchImpl ?? fetch;
   const timeoutMs = deps.timeoutMs ?? UPDATE_PREPARE_TIMEOUT_MS;
@@ -481,6 +483,10 @@ export interface UpdatePrepareCommandDeps extends Omit<PrepareDeps, "version"> {
 export async function runUpdatePrepareCommand(args: string[], deps: UpdatePrepareCommandDeps): Promise<number> {
   const out = deps.out ?? ((t: string) => process.stdout.write(t));
   const err = deps.err ?? ((t: string) => process.stderr.write(t));
+  if (INSTALLER_UPDATES_DISABLED) {
+    err(`update: ${UPDATE_INSTALLATION_DISABLED_MESSAGE}\n`);
+    return UPDATE_PREPARE_FAILED;
+  }
   const version = args[0];
   if (!version || args.length !== 1) {
     err("update: usage: plannotator update-prepare <version>\n");

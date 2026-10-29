@@ -116,3 +116,13 @@ export PLANNOTATOR_PORT=9999
 The Plannotator Inbox has its own `plannotator inbox --tailscale` (owner-only, persistent, a separate listener; see "Over your tailnet" under "Plannotator Inbox"), which this per-session flag never handles (`index.ts` leaves `--tailscale` to the `inbox` subcommand).
 
 **The crash window (both `--tailscale` forms).** A `--bg` serve mapping outlives its process. After a SIGKILL, an OOM kill or a reboot it keeps pointing at a loopback port that nothing holds any more, and any local server that later binds that port is published to the tailnet until the mapping is removed. `review` / `annotate` sessions have no record to recover from: remove it with `tailscale serve --https=<port> off`. The Inbox records its mapping in `inbox.json` before making it, and every Inbox start (and `uninstall --purge`) removes a recorded mapping whose proxy port is not its own, so the window closes at the next start; until then it is open. A loopback-only proxy target that no other process can take (a unix socket) is the follow-up that closes it.
+
+## Fork builds without installer updates
+
+Compile the CLI with `--define '__PLANNOTATOR_DISABLE_INSTALLER_UPDATES__=true'` to prohibit installer downloads and execution.
+The fork's release workflow sets this for every compiled CLI target.
+This build-time policy overrides runtime automatic-update settings and explicit update requests, including internal
+`update-prepare` calls. Installer prompts and terminal update hints are suppressed.
+The Inbox still offers a restart when it detects a manually replaced binary.
+`plannotator update` explains the manual build and verification path.
+Source runs without the define retain upstream update behavior.

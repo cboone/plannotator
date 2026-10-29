@@ -53,6 +53,7 @@ import {
   type ReleaseHighlight,
 } from "@plannotator/shared/update-check";
 import {
+  INSTALLER_UPDATES_DISABLED,
   autoUpdatePaths,
   isManagedBinary,
   isUpdateLockHeld,
@@ -116,7 +117,7 @@ export interface InboxUpdateDetails {
   summary: string;
   /** The remembered install flags as the installer spells them (`--skip-gemini`). */
   flags: string[];
-  /** The install command a person runs by hand, with those flags. */
+  /** The update command; restricted builds print manual build instructions. */
   command: string;
   /** The Claude Code plugin is the person's to update (`--skip-claude-plugin` was remembered). */
   plugin_command: string | null;
@@ -416,6 +417,11 @@ export function createInboxUpdates(options: InboxUpdatesOptions) {
   };
 
   const compute = (): InboxUpdate | null => {
+    if (INSTALLER_UPDATES_DISABLED) {
+      return onDisk && onDisk !== options.version
+        ? { available: true, state: "ready", version: onDisk, current: options.version, action: "copy", releaseUrl: releaseUrlFor(onDisk) }
+        : null;
+    }
     if (release) {
       // A wrapper killed outright (or a restart mid-install) left update.lock:
       // record it as failed and release it, so "Updating…" never spins on.
@@ -559,10 +565,10 @@ export function createInboxUpdates(options: InboxUpdatesOptions) {
             ? new Date(state.releaseCheck.failedAt).toISOString()
             : null,
       },
-      auto_update: { on: resolveAutoUpdate(config), env: parseAutoUpdateEnv() ?? null, supported: release && isManaged() },
+      auto_update: { on: !INSTALLER_UPDATES_DISABLED && resolveAutoUpdate(config), env: parseAutoUpdateEnv() ?? null, supported: !INSTALLER_UPDATES_DISABLED && release && isManaged() },
       summary: notes ? releaseSummary(notes.notes) : "",
       flags: installerFlagArgs(flags, process.platform),
-      command: installCommandFor(process.platform, flags),
+      command: INSTALLER_UPDATES_DISABLED ? "plannotator update" : installCommandFor(process.platform, flags),
       plugin_command: flags.includes("skip-claude-plugin") ? CLAUDE_PLUGIN_UPDATE_COMMANDS.join(" && ") : null,
       sessions: sessions.map((s) => ({ mode: s.mode, project: s.project, label: s.label, started_at: s.startedAt })),
       failure: current?.state === "failed" && result ? failureDetails(result.exitCode, paths.log) : null,

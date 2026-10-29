@@ -31,6 +31,8 @@
 
 import { UPDATE_EXIT_CHECKSUM_MISMATCH, UPDATE_EXIT_DOWNLOAD_FAILED } from "@plannotator/core/update-exit-codes";
 import { lastRunLog, stagingFailureIn } from "./update-log";
+import { INSTALLER_UPDATES_DISABLED, UPDATE_INSTALLATION_DISABLED_MESSAGE } from "./update-policy";
+export { INSTALLER_UPDATES_DISABLED, UPDATE_INSTALLATION_DISABLED_MESSAGE } from "./update-policy";
 import { spawn } from "node:child_process";
 import {
   closeSync,
@@ -72,6 +74,7 @@ import {
   releaseUrlFor,
   runReleaseCheck,
   updateLog,
+  takeUpdateHint,
   type FetchReleaseResult,
   type InstallFlagId,
   buildUpdateCheckFailing,
@@ -545,6 +548,7 @@ function releaseFetcher(deps: Pick<AutoUpdateDeps, "fetchRelease" | "fetchLatest
 }
 
 export async function runAutoUpdateCheck(deps: AutoUpdateDeps): Promise<AutoUpdateOutcome> {
+  if (INSTALLER_UPDATES_DISABLED) return "disabled";
   const current = deps.currentVersion;
   if (!current || !parseStableVersion(current)) return "dev-build";
   if (!deps.enabled()) return "disabled";
@@ -685,7 +689,7 @@ export interface ManualUpdateDeps {
 
 export type ManualUpdateBegin =
   | { outcome: "ready"; launch: InstallerLaunch; fromVersion: string }
-  | { outcome: "dev-build" | "unmanaged" | "no-release" | "up-to-date" | "locked" };
+  | { outcome: "disabled" | "dev-build" | "unmanaged" | "no-release" | "up-to-date" | "locked" };
 
 /**
  * The person asked for the update: the same installer, lock, log, result file
@@ -696,6 +700,7 @@ export type ManualUpdateBegin =
  * a downgrade.
  */
 export function beginManualUpdate(deps: ManualUpdateDeps): ManualUpdateBegin {
+  if (INSTALLER_UPDATES_DISABLED) return { outcome: "disabled" };
   const current = deps.currentVersion;
   if (!current || !parseStableVersion(current)) return { outcome: "dev-build" };
   if (!deps.isManaged()) return { outcome: "unmanaged" };
@@ -736,7 +741,7 @@ export function beginManualUpdate(deps: ManualUpdateDeps): ManualUpdateBegin {
 export type ManualUpdateOutcome =
   | { outcome: "launched"; version: string }
   | { outcome: "launch-failed"; version: string }
-  | { outcome: "dev-build" | "unmanaged" | "no-release" | "up-to-date" | "locked" };
+  | { outcome: "disabled" | "dev-build" | "unmanaged" | "no-release" | "up-to-date" | "locked" };
 
 /** Update now, detached: what the Inbox and a review window's Update button run. */
 export function startManualUpdate(
@@ -968,6 +973,7 @@ function installerEnv(launch: InstallerLaunch): { file: string; args: string[]; 
 }
 
 export function launchInstaller(launch: InstallerLaunch): void {
+  if (INSTALLER_UPDATES_DISABLED) throw new Error(UPDATE_INSTALLATION_DISABLED_MESSAGE);
   const logFd = openSync(launch.logPath, "a");
   try {
     const { file, args, env } = installerEnv(launch);
@@ -995,6 +1001,7 @@ export function runInstallerForeground(
   write: (chunk: string) => void,
   options: { onSpawn?: (child: ReturnType<typeof spawn>) => void } = {},
 ): Promise<number> {
+  if (INSTALLER_UPDATES_DISABLED) return Promise.reject(new Error(UPDATE_INSTALLATION_DISABLED_MESSAGE));
   return new Promise((resolve) => {
     // While the installer runs, an INT or TERM to this process is passed to
     // the wrapper (whose trap records 130 and releases the lock) instead of
@@ -1119,12 +1126,19 @@ export function cliNoticeVersion(): string | undefined {
   return noticeVersion;
 }
 
+/** Terminal notices obey the same installation policy as the UI. */
+export function takeCliUpdateHint(input: Parameters<typeof takeUpdateHint>[0]): string | null {
+  if (INSTALLER_UPDATES_DISABLED) return null;
+  return takeUpdateHint(input);
+}
+
 /**
  * True when this compiled CLI will update itself: auto-update is on and the
  * running binary is the one the install script manages. The UI then drops the
  * redundant "new version available" toast.
  */
 export function isAutoUpdateActive(): boolean {
+  if (INSTALLER_UPDATES_DISABLED) return false;
   if (!noticeVersion) return false;
   try {
     const config = loadConfig();
@@ -1164,7 +1178,7 @@ export function getAutoUpdateAdvert(): {
   autoUpdateActive?: true;
   autoUpdateNotice?: AutoUpdateNotice;
 } {
-  if (!noticeVersion) return {};
+  if (INSTALLER_UPDATES_DISABLED || !noticeVersion) return {};
   let managed = false;
   try {
     managed = isManagedBinary(process.execPath);
@@ -1211,7 +1225,7 @@ export function getUpdateAdvert(
   origin?: string | null,
   options: { exposed?: boolean } = {},
 ): { updateAvailable?: UpdateAdvert; updateCheckFailing?: UpdateCheckFailingAdvert } {
-  if (!noticeVersion) return {};
+  if (INSTALLER_UPDATES_DISABLED || !noticeVersion) return {};
   try {
     if (!resolveUpdateCheck(loadConfig())) return {};
     const dataDir = getPlannotatorDataDir();
@@ -1268,6 +1282,7 @@ export function handleUpdateRoute(
     const result = startManualUpdateForThisBinary(noticeVersion);
     if (result.outcome === "launched") return Response.json({ ok: true, version: result.version });
     const refused: Record<string, string> = {
+      disabled: UPDATE_INSTALLATION_DISABLED_MESSAGE,
       locked: "An update is already running.",
       unmanaged: "This copy of Plannotator was not installed by the install script, so it can't update itself.",
       "dev-build": "This is a development build; there is nothing to update.",

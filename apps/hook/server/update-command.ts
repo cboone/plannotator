@@ -1,6 +1,10 @@
 /**
  * `plannotator update [--check]`: install the newest stable release now.
  *
+ * Builds with installer updates disabled return 1 with manual-build
+ * instructions, including for --check, without contacting GitHub. The
+ * behavior below applies to unrestricted builds.
+ *
  * It runs the same thing as background auto-update and the Inbox's Update
  * now: the install script for the pinned tag with the remembered install
  * flags, under update.lock, logging to update.log and recording
@@ -33,6 +37,8 @@ import {
   type FetchReleaseResult,
 } from "@plannotator/shared/update-check";
 import {
+  INSTALLER_UPDATES_DISABLED,
+  UPDATE_INSTALLATION_DISABLED_MESSAGE,
   autoUpdatePaths,
   beginManualUpdate,
   isManagedBinary,
@@ -82,6 +88,11 @@ export async function runUpdateCommand(args: string[], deps: UpdateCommandDeps):
       err(`Unknown option: ${arg}\n\n${UPDATE_COMMAND_USAGE}\n`);
       return 2;
     }
+  }
+
+  if (INSTALLER_UPDATES_DISABLED) {
+    err(`${UPDATE_INSTALLATION_DISABLED_MESSAGE}\n`);
+    return 1;
   }
 
   const current = deps.currentVersion;
