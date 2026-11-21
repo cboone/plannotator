@@ -1,10 +1,10 @@
 /**
  * Snoozes in the store (approval "inbox-snooze"): the person's own state,
  * outside the event log. What can regress: a snooze writing a store line or
- * taking a seq (an agent's cursor would move), an agent's message or new
- * question ending a snooze, the person's reply, Mark read or Archive not
- * ending it, a look ending it before its time, a return's mark lost on a
- * restart, the file left world-readable, and an entry outliving its thread.
+ * taking a seq (an agent's cursor would move), an agent's message, the person's
+ * reply, Mark read or Archive leaving a snooze running, a look ending it
+ * before its time, a return's mark lost on a restart, the file left
+ * world-readable, and an entry outliving its thread.
  * The property runs a store with snoozes beside a twin that never snoozes and
  * checks every row an agent or the list reads never differs.
  */
@@ -108,19 +108,38 @@ describe("snoozes in the store", () => {
     expect(code(() => store.setSnooze(thread, new Date(t.now().getTime() + HOUR).toISOString()))).toBe("thread_resolved");
   });
 
-  test("nothing an agent writes ends it, a new question included", () => {
+  test("an agent's named post or new question ends a running snooze", () => {
     const t = clock();
-    const { store, project } = open(t.now);
+    const { dir, store, project } = open(t.now);
     const thread = store.sendMessage({ project_id: project.id, author: agent("ses_a"), body: "News", thread: "lane" }).message.thread_id;
-    store.setSnooze(thread, new Date(t.now().getTime() + HOUR).toISOString());
+    const until = new Date(t.now().getTime() + HOUR).toISOString();
+    store.setSnooze(thread, until);
     store.sendMessage({ project_id: project.id, author: agent("ses_a"), body: "More news", thread: "lane" });
+    expect(store.snoozes()).toEqual([]);
+    store.setSnooze(thread, until);
     store.sendMessage({ project_id: project.id, author: agent("ses_a"), body: ASK, thread: "lane" });
-    expect(store.snoozedThreads().has(thread)).toBe(true);
+    expect(InboxStore.open(dir, { now: t.now }).snoozes()).toEqual([]);
     // The question is open for the agent, as it would be without a snooze.
     expect(store.listRow(thread)!.questions.open).toBe(1);
   });
 
-  test("an agent's archive (resolve_message) does not end it: the agent writing again finds the thread still snoozed", () => {
+  test("a guide post ends a running snooze, and replay leaves a later snooze running", () => {
+    const t = clock();
+    const { store, project } = open(t.now);
+    const author = agent("ses_a");
+    const root = store.sendMessage({ project_id: project.id, author, body: "News" }).message;
+    const until = new Date(t.now().getTime() + HOUR).toISOString();
+    const guide = { sha256: "a".repeat(64), input_sha256: "b".repeat(64), bytes: 100, title: "Index", sections: 1, files: 1, additions: 1, deletions: 0 };
+    const post = { project_id: project.id, author, body: "Index guide", guide, reply_to: root.id, idempotency_key: "guide" };
+    store.setSnooze(root.id, until);
+    expect(store.sendMessage(post).message.thread_id).toBe(root.id);
+    expect(store.snoozes()).toEqual([]);
+    store.setSnooze(root.id, until);
+    expect(store.sendMessage(post).replayed).toBe(true);
+    expect(store.snoozedThreads()).toEqual(new Set([root.id]));
+  });
+
+  test("an agent's archive leaves the snooze running until the agent writes again", () => {
     const t = clock();
     const { store, project } = open(t.now);
     const root = store.sendMessage({ project_id: project.id, author: agent("ses_a"), body: "News", thread: "lane" }).message;
@@ -130,7 +149,9 @@ describe("snoozes in the store", () => {
     expect(store.snoozes().map((s) => s.thread_id)).toEqual([root.thread_id]);
     store.sendMessage({ project_id: project.id, author: agent("ses_a"), body: "Back again", reply_to: root.id });
     expect(store.listRow(root.thread_id)!.back_from_archive || store.listRow(root.thread_id)!.agent_after_archive).toBe(true);
-    expect(store.snoozedThreads().has(root.thread_id)).toBe(true);
+    expect(store.snoozedThreads().has(root.thread_id)).toBe(false);
+    t.go(2 * HOUR);
+    expect(store.snoozes()).toEqual([]);
   });
 
   test("an agent's archive and then its time: reopened, the thread comes back with no return; while it runs, the snooze stays", () => {
@@ -177,24 +198,53 @@ describe("snoozes in the store", () => {
     const personUntil = inAnHour();
     store.setSnooze(personArchived.thread_id, personUntil);
 
-    // An agent archives a snoozed thread and writes in it while the snooze runs.
+    // An agent archives a snoozed thread. Its first post after archiving comes after the snooze lapses.
     const agentArchived = write("agent");
     const agentUntil = inAnHour();
     store.setSnooze(agentArchived.thread_id, agentUntil);
     store.resolveThread(agentArchived.id, true);
-    write("agent", agentArchived.id);
 
     t.go(2 * HOUR);
     const cases = [
       ["plain", plain, plainUntil],
       ["person", personArchived, personUntil],
-      ["agent", agentArchived, agentUntil],
     ] as const;
     for (const [name, root, until] of cases) {
       expect(back(root.thread_id)).toBe(until);
       write(name, root.id);
       expect(back(root.thread_id)).toBe(until);
     }
+    write("agent", agentArchived.id);
+    expect(back(agentArchived.thread_id)).toBe(agentUntil);
+    write("agent", agentArchived.id);
+    expect(back(agentArchived.thread_id)).toBe(agentUntil);
+  });
+
+  test("routine changes, permission withdrawals and launch notes leave a running snooze", () => {
+    const t = clock();
+    const { store, project } = open(t.now);
+    const author = agent("ses_a");
+    const root = store.sendMessage({ project_id: project.id, author, body: "News" }).message;
+    const permission = {
+      project_id: project.id,
+      author: agent("perm:ses_a"),
+      permission: true,
+      reply_to: root.id,
+    };
+    const prompt = store.sendMessage({ ...permission, body: ASK }).message;
+    const until = new Date(t.now().getTime() + HOUR).toISOString();
+    store.setSnooze(root.id, until);
+
+    const expectSnoozed = () => expect(store.snoozedThreads()).toEqual(new Set([root.id]));
+    store.sendMessage({
+      project_id: project.id, author, reply_to: root.id, body: "Routine updated.",
+      scheduled_change: { scheduled_id: "routine", name: "Routine", op: "update" },
+    });
+    expectSnoozed();
+    store.sendMessage({ ...permission, body: "Permission request withdrawn.", supersedes: [prompt.id] });
+    expectSnoozed();
+    store.sendMessage({ project_id: project.id, author, reply_to: root.id, body: "Launch cancelled.", launch_note: true });
+    expectSnoozed();
   });
 
   test("`at` (Undo's earlier snooze) is a real time, not after now, and stored normalized", () => {

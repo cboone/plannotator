@@ -120,6 +120,16 @@ describe("the permission route", () => {
     expect(store.snoozedThreads().has(root.id)).toBe(true);
   });
 
+  test("withdrawing a permission prompt leaves the launch thread snoozed", async () => {
+    const { store, root, clock, permissions, call } = setup();
+    const { body } = await call({ key: KEY, request_id: "req-00000011", event: EVENT });
+    expect(body.status).toBe("waiting");
+    store.setSnooze(root.id, new Date(clock.now + 60 * 60 * 1000).toISOString());
+    permissions.withdrawAll(store.message(root.id)!);
+    expect(store.questionsOf(body.message_id!)[0]!.state).toBe("superseded");
+    expect(store.snoozedThreads()).toEqual(new Set([root.id]));
+  });
+
   test("Allow for this session hands the hook the choice only, records the delivery, and is never a turn for the session", async () => {
     const { store, root, call, answer } = setup();
     const { body } = await call({ key: KEY, request_id: "req-00000002", event: EVENT });

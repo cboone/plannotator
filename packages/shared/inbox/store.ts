@@ -1601,9 +1601,9 @@ export class InboxStore {
   }
 
   /**
-   * The person acted on the thread, so its snooze is over: their reply, Mark
-   * read, Archive. The act already stands, so a file that cannot be written
-   * never fails it; the snooze then runs out by itself.
+   * The person's reply, Mark read and Archive end a snooze. An agent message
+   * ends a running snooze. The act already stands, so a file that cannot be
+   * written never fails it; the snooze then runs out by itself.
    */
   endSnooze(threadId: string): void {
     try {
@@ -4444,6 +4444,10 @@ export class InboxStore {
         at,
       );
     }
+    if (threadId && !input.permission && !input.launch_note && !input.scheduled_change &&
+      this.snoozeList.some((entry) => entry.thread_id === threadId && inboxSnoozeRunning(entry.until, this.now()))) {
+      this.endSnooze(threadId);
+    }
     // A reply from the agent reopens nothing: a resolved thread stays resolved.
     return { message: this.wire(message), replayed: false, ...(naming ? { naming } : {}), ...(doneIds.length > 0 ? { done: doneIds } : {}) };
   }
@@ -5567,9 +5571,8 @@ export class InboxStore {
 
   /**
    * Resolve (or reopen) the thread a message belongs to. `by`: whose Archive
-   * it is. Only the person's ends a snooze (approval "inbox-snooze": nothing an
-   * agent writes ends it); an agent's `resolve_message` leaves the snooze, so
-   * a thread the agent archives and then writes in again stays snoozed.
+   * it is. The person's Archive ends a snooze. An agent's `resolve_message`
+   * leaves the snooze in place.
    */
   resolveThread(messageId: string, resolved: boolean, by: "person" | "agent" = "agent"): InboxThreadSummary {
     const message = this.messages.get(messageId);

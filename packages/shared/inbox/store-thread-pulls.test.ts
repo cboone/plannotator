@@ -46,6 +46,14 @@ function lines(dir: string, project: { key: string }) {
   return readFileSync(join(dir, "inbox", "projects", project.key, PULLS_FILE), "utf8").trim().split("\n").map((line) => JSON.parse(line));
 }
 
+test("adding a PR leaves a running snooze", () => {
+  const { store, thread } = world();
+  store.setSnooze(thread, "2026-11-08T11:00:00.000Z");
+  const changed = store.changeThreadPulls({ thread_id: thread, add: refs("o/r#1"), by: BY_AGENT });
+  expect(changed.added).toHaveLength(1);
+  expect(store.snoozedThreads()).toEqual(new Set([thread]));
+});
+
 function refusal(run: () => unknown): InboxError {
   try {
     run();

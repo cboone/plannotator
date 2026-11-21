@@ -2,7 +2,7 @@
  * Snooze (approval "inbox-snooze") through the Inbox's real doors on a running
  * Inbox (temp data dir, loopback). What can regress: a snoozed thread left in
  * its section (or the counts), the phone's list losing it, an agent reading
- * any of it or its question closing, an agent's question ending the snooze,
+ * any of it or its question closing, an agent's message leaving a snooze running,
  * the person's reply not ending it, the return not coming at its time (the
  * timer's `event: snoozes`, the list's clock), a Status in search finding a
  * snoozed thread, a project batch ending one, and a past time accepted.
@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import type { InboxListRow, InboxListSection } from "@plannotator/core/inbox-types";
 import { startInboxServer, type InboxServer } from "./inbox";
+import { GUIDE_BRIEF_EXAMPLE } from "./inbox-guides";
 import { savedConfig } from "../../tests/helpers/saved-config";
 
 const roots: string[] = [];
@@ -193,21 +194,64 @@ describe("snooze", () => {
     expect(phone.sections.flatMap((s) => s.threads).find((r) => r.thread_id === a.thread_id)!.snoozed).toEqual(answer.snoozed);
   });
 
-  test("an agent sees nothing, its question stays open, and a new question does not end it; the person's reply does", async () => {
+  test("a new question returns the thread to Waiting, and the person's reply ends a second snooze", async () => {
     const { server, client, send } = await setup();
     const a = await send("Plain news", "ses_a");
-    await snooze(server, a.thread_id, later(3_600_000));
+    expect((await snooze(server, a.thread_id, later(3_600_000))).status).toBe(200);
+    expect(sectionOf(await list(server), a.thread_id)).toBeNull();
     const asked = await send(ASK, "ses_a", a.message_id);
     expect(asked.thread_id).toBe(a.thread_id);
+    const after = await list(server);
+    expect(after.snoozed).toEqual([]);
+    expect(sectionOf(after, a.thread_id)).toBe("waiting");
+
+    expect((await snooze(server, a.thread_id, later(3_600_000))).status).toBe(200);
     const read = await client.callTool({ name: "read_thread", arguments: { thread_id: a.thread_id, agent_session: "ses_a" } });
     expect(JSON.stringify(read)).not.toMatch(/snooz/i);
     expect(server.store.listRow(a.thread_id)!.questions.open).toBe(1);
     expect((await list(server)).snoozed!.map((r) => r.thread_id)).toEqual([a.thread_id]);
     const replied = await post(server, `/api/inbox/messages/${asked.message_id}/reply`, { idempotency_key: "r1", words: "Pagefind." });
     expect(replied.status).toBe(200);
+    const answered = await list(server);
+    expect(answered.snoozed).toEqual([]);
+    expect(sectionOf(answered, a.thread_id)).not.toBeNull();
+  });
+
+  test("send_message by reply_to ends the snooze and returns the thread to New", async () => {
+    const { server, send } = await setup();
+    const root = await send("Plain news", "ses_a");
+    expect((await snooze(server, root.thread_id, later(3_600_000))).status).toBe(200);
+    expect((await send("More news", "ses_a", root.message_id)).thread_id).toBe(root.thread_id);
     const after = await list(server);
     expect(after.snoozed).toEqual([]);
-    expect(sectionOf(after, a.thread_id)).not.toBeNull();
+    expect(sectionOf(after, root.thread_id)).toBe("new");
+  });
+
+  test("send_message by thread name ends the snooze and returns the thread to New", async () => {
+    const { server, client, project } = await setup();
+    const sendNamed = (body: string) => client.callTool({ name: "send_message", arguments: { project_path: project, agent_session: "ses_a", thread: "index", body } });
+    const root = await sendNamed("Plain news");
+    expect(root.isError).toBeUndefined();
+    const thread = (root.structuredContent as { thread_id: string }).thread_id;
+    expect((await snooze(server, thread, later(3_600_000))).status).toBe(200);
+    const posted = await sendNamed("More news");
+    expect(posted.isError).toBeUndefined();
+    expect(posted.structuredContent).toMatchObject({ thread_id: thread });
+    const after = await list(server);
+    expect(after.snoozed).toEqual([]);
+    expect(sectionOf(after, thread)).toBe("new");
+  });
+
+  test("submit_guide ends the snooze and returns the thread to New", async () => {
+    const { server, client, send, project } = await setup();
+    const a = await send("Plain news", "ses_a");
+    expect((await snooze(server, a.thread_id, later(3_600_000))).status).toBe(200);
+    const guide = await client.callTool({ name: "submit_guide", arguments: { ...GUIDE_BRIEF_EXAMPLE, project_path: project, agent_session: "ses_a", reply_to: a.message_id } });
+    expect(guide.isError).toBeUndefined();
+    expect(guide.structuredContent).toMatchObject({ thread_id: a.thread_id });
+    const after = await list(server);
+    expect(after.snoozed).toEqual([]);
+    expect(sectionOf(after, a.thread_id)).toBe("new");
   });
 
   test("at its time the thread comes back to its own section, bold, with the clock; the windows hear `event: snoozes`", async () => {
@@ -281,15 +325,16 @@ describe("snooze", () => {
     }
   });
 
-  test("an agent's resolve_message leaves the snooze; the person's Archive ends it", async () => {
+  test("an agent's resolve_message leaves the snooze; an agent post or the person's Archive ends it", async () => {
     const { server, client, send, project } = await setup();
     const a = await send("Plain news", "ses_a");
     await snooze(server, a.thread_id, later(3_600_000));
-    await client.callTool({ name: "resolve_message", arguments: { message_id: a.message_id } });
+    expect((await client.callTool({ name: "resolve_message", arguments: { message_id: a.message_id } })).isError).toBeUndefined();
     expect(server.store.snoozedThreads()).toEqual(new Set([a.thread_id]));
-    // The agent writes again after its own archive: the thread is still in the band, not back in the list.
-    await client.callTool({ name: "send_message", arguments: { project_path: project, agent_session: "ses_a", agent_name: "Claude Code", body: "One more thing", reply_to: a.message_id } });
-    expect((await list(server)).snoozed!.map((r) => r.thread_id)).toEqual([a.thread_id]);
+    const posted = await client.callTool({ name: "send_message", arguments: { project_path: project, agent_session: "ses_a", agent_name: "Claude Code", body: "One more thing", reply_to: a.message_id } });
+    expect(posted.isError).toBeUndefined();
+    expect((await list(server)).snoozed).toEqual([]);
+
     const b = await send("Other news", "ses_b");
     await snooze(server, b.thread_id, later(3_600_000));
     expect((await post(server, `/api/inbox/messages/${b.message_id}/resolve`, { resolved: true })).status).toBe(200);
