@@ -87,7 +87,7 @@ export function dispatchShortcutEvent<TScope extends ShortcutScopeDefinition<any
   for (const [actionId, shortcut] of getShortcutEntries(scope)) {
     const handler = handlers[actionId];
     if (!handler) continue;
-    if (!resolveShortcutBindings(shortcut).some(binding => matchesShortcutBinding(event, binding))) continue;
+    if (!resolveShortcutBindings(shortcut).some(binding => matchesShortcutBinding(event, binding, scope))) continue;
 
     const { when, handle } = normalizeShortcutHandler(handler);
     if (when && !when(event)) continue;
@@ -159,7 +159,7 @@ export function useShortcutScope<TScope extends ShortcutScopeDefinition<any>>({
 
       for (const candidate of active) {
         const group = candidate.groups[candidate.nextIndex];
-        if (!group || !matchesShortcutBindingGroup(keyboardEvent, group)) continue;
+        if (!group || !matchesShortcutBindingGroup(keyboardEvent, group, scope)) continue;
         if (candidate.nextIndex === candidate.groups.length - 1) {
           const shortcut = scope.shortcuts[candidate.actionId];
           const handler = handlersRef.current[candidate.actionId];
@@ -187,9 +187,8 @@ export function useShortcutScope<TScope extends ShortcutScopeDefinition<any>>({
       for (const [actionId, shortcut] of getShortcutEntries(scope)) {
         const handler = handlersRef.current[actionId];
         if (!handler) continue;
-        const { when } = normalizeShortcutHandler(handler);
-        if (when && !when(keyboardEvent)) continue;
-
+        // The sequences this key starts, before the guard: a guard can read the whole page, and most keys start none.
+        const starts: string[][] = [];
         for (const binding of resolveShortcutBindings(shortcut)) {
           const groups = binding.trim().split(/\s+/).filter(Boolean);
           const doubleTapKey = parseDoubleTapBinding(binding);
@@ -197,12 +196,16 @@ export function useShortcutScope<TScope extends ShortcutScopeDefinition<any>>({
             groups.length < 2
             || groups.includes('hold')
             || (doubleTapKey !== null && ['Alt', 'Shift', 'Mod'].includes(doubleTapKey))
-            || !matchesShortcutBindingGroup(keyboardEvent, groups[0] ?? '')
+            || !matchesShortcutBindingGroup(keyboardEvent, groups[0] ?? '', scope)
           ) {
             continue;
           }
-          started.push({ actionId, groups, nextIndex: 1 });
+          starts.push(groups);
         }
+        if (starts.length === 0) continue;
+        const { when } = normalizeShortcutHandler(handler);
+        if (when && !when(keyboardEvent)) continue;
+        for (const groups of starts) started.push({ actionId, groups, nextIndex: 1 });
       }
 
       sequenceRef.current = started.length > 0

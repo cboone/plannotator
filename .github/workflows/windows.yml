@@ -1,39 +1,81 @@
 name: Windows
 
-# The Windows jobs: the uninstall lifecycle, the Qwen Code installer steps, the
+# The Windows jobs: the uninstall lifecycle (with the installers' binary
+# download), the Qwen Code installer steps, the
+# code review diagram engine build, the Claude Code mod's Windows shells, the
 # Pi extension's Node runtime, and install.cmd / install.ps1 end to end. They
-# are part of the full tier: on a PR they run only once it has the `ci:full`
-# label (adding the label starts them on the current head; every later push
-# runs them again). Pushes to main and manual runs always run them. The
-# `Full CI (all green)` job at the end is what the merge script requires.
+# are a heavy suite: on a PR each job runs only when its own paths change (the
+# gate job, scripts/ci-affected.ts gate windows: GATES['windows.yml'] and
+# HEAVY_FAIL_SAFE), with no label; otherwise it reports skipped. The nightly
+# run on main, manual runs and a failed gate run every job (a manual run given
+# as_if_changed plans as if a PR changed those paths).
 
 on:
   workflow_dispatch:
+    inputs:
+      as_if_changed:
+        description: "Preview a PR's run: plan as if a PR changed only these paths (space-separated). Empty runs everything."
+        required: false
+        default: ""
+        type: string
   pull_request:
     branches:
       - main
-    types: [opened, synchronize, reopened, labeled]
-  push:
-    branches:
-      - main
+  # Main is not run after every merge: the merge train already ran this
+  # workflow on the tree it merges. A nightly run on main catches a hand
+  # merge, and a release dispatches it on main before the tag.
+  schedule:
+    - cron: "22 7 * * *"
 
 permissions:
   contents: read
 
-# One run per PR, and one per main: a newer push cancels the older run. Adding
-# any other label starts a run that skips every job; it gets a group of its own
-# so it cannot cancel the real one. Manual runs are never cancelled.
+# One run per PR: a newer push cancels the older run. Nightly and manual runs
+# are never cancelled.
 concurrency:
-  group: windows-${{ github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.label.name != 'ci:full' && format('run-{0}', github.run_id) || github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.event_name == 'push' && github.ref || format('run-{0}', github.run_id) }}
+  group: windows-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
   cancel-in-progress: true
 
 jobs:
+  # Which Windows jobs this change needs. Path rules only (no install), on
+  # ubuntu-24.04. Anything it cannot resolve runs every job.
+  gate:
+    name: Windows (path gate)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      uninstall: ${{ steps.gate.outputs.uninstall }}
+      qwen: ${{ steps.gate.outputs.qwen }}
+      diagram_engine: ${{ steps.gate.outputs.diagram_engine }}
+      claude_code_mod: ${{ steps.gate.outputs.claude_code_mod }}
+      pi_runtime: ${{ steps.gate.outputs.pi_runtime }}
+      install_cmd: ${{ steps.gate.outputs.install_cmd }}
+      install_ps1: ${{ steps.gate.outputs.install_ps1 }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          # The merge commit and both parents: HEAD^1..HEAD is the PR's change.
+          fetch-depth: 2
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4
+
+      - name: Which Windows jobs does this change need?
+        id: gate
+        env:
+          CI_AFFECTED: ${{ vars.CI_AFFECTED }}
+          CI_AFFECTED_AS_IF: ${{ inputs.as_if_changed }}
+        run: bun run scripts/ci-affected.ts gate windows
+
   uninstall-windows:
     # Run the filesystem and path logic under real Windows path semantics.
     # The tests inject temporary homes and process boundaries, so this job
     # never touches the runner's actual agent installations or user data.
     name: Uninstall lifecycle (Windows)
-    if: github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'ci:full') && (github.event.action != 'labeled' || github.event.label.name == 'ci:full'))
+    needs: gate
+    if: ${{ !cancelled() && needs.gate.outputs.uninstall != 'false' }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -48,46 +90,14 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Run focused uninstall tests
-        run: bun test packages/server/uninstall.test.ts apps/hook/server/cli.test.ts packages/server/auto-update.test.ts
+        run: bun test packages/server/uninstall.test.ts apps/hook/server/cli.test.ts packages/server/auto-update.test.ts packages/server/auto-update-stuck.test.ts
 
-  # Path gate for the Qwen Code installer jobs below (about 20 Windows runner
-  # minutes per run). Only these files can change what those tests run: the
-  # installers, their tests, the Qwen Code extension they install, the test
-  # setup, and this workflow. The same Qwen Code tests also run under pwsh in
-  # the unit lanes on every PR. Anything this cannot resolve (a push to main, a
-  # manual run, a checkout that is not the PR merge commit) runs the jobs:
-  # skipping is the risky direction. A skipped job reports as skipped, not
-  # missing.
-  qwen-gate:
-    name: Qwen Code installer steps (path gate)
-    if: github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'ci:full') && (github.event.action != 'labeled' || github.event.label.name == 'ci:full'))
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    outputs:
-      run: ${{ steps.gate.outputs.run }}
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          persist-credentials: false
-          # The merge commit plus both parents, as in the guides-show job of test.yml.
-          fetch-depth: 2
-
-      - name: Does this change touch the Qwen Code installer steps?
-        id: gate
-        run: |
-          set -eu
-          run=true
-          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] \
-             && base=$(git rev-parse --verify --quiet 'HEAD^1') \
-             && git rev-parse --verify --quiet 'HEAD^2' >/dev/null; then
-            changed=$(git diff --name-only "$base" HEAD)
-            if grep -Eq '^(scripts/install\.(ps1|cmd)$|scripts/install\.test\.ts$|apps/qwen-code/|packages/shared/t3-hook-command\.ts$|tests/setup/|bunfig\.toml$|package\.json$|bun\.lock$|\.github/workflows/windows\.yml$)' <<< "$changed"; then
-              run=true
-            else
-              run=false
-            fi
-          fi
-          echo "run=$run" >> "$GITHUB_OUTPUT"
+      # The installers' binary download continuing after a dropped or stalled
+      # connection: install.ps1's under pwsh and Windows PowerShell 5.1, and
+      # install.cmd's under cmd.exe with the real curl.exe, against a local
+      # server (no network). Linux runs only the install.sh and pwsh parts.
+      - name: Run the installers' binary download tests
+        run: bun test scripts/install-download.test.ts
 
   qwen-installers-windows:
     # The Windows installers' Qwen Code steps on real Windows: install.ps1's
@@ -101,10 +111,10 @@ jobs:
     # anywhere in the name; one requires "install.cmd (cmd.exe)" and the other
     # forbids it, in any order, so together they are every "Qwen Code" test,
     # each once. A part that matches nothing fails (bun test exits 1 when a
-    # filter finds none). They run only when qwen-gate says so.
+    # filter finds none). They run only when the gate says so.
     name: Qwen Code installer steps (Windows, ${{ matrix.part }})
-    needs: qwen-gate
-    if: needs.qwen-gate.outputs.run == 'true'
+    needs: gate
+    if: ${{ !cancelled() && needs.gate.outputs.qwen != 'false' }}
     runs-on: windows-latest
     # Windows PowerShell 5.1 starts slowly on the runner: about 20 minutes in one job.
     timeout-minutes: 45
@@ -133,13 +143,71 @@ jobs:
           PATTERN: ${{ matrix.pattern }}
         run: bun test scripts/install.test.ts --test-name-pattern $env:PATTERN
 
+  diagram-engine-windows:
+    # Builds code review's diagram engine on real Windows. Its plugins compare
+    # Vite's module ids, which use `/` everywhere, with paths the script builds
+    # itself; on Linux those match whether or not they are normalized, so only
+    # a Windows build catches a comparison that skips normalizePath (the build
+    # stops, or the guard silently checks nothing). The built-output test then
+    # proves the engine carries no runtime and no React of its own. Runs only
+    # when the gate says so.
+    name: Diagram engine build (Windows)
+    needs: gate
+    if: ${{ !cancelled() && needs.gate.outputs.diagram_engine != 'false' }}
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build the diagram engine
+        run: bun apps/review/diagram-engine/build.ts
+
+      - name: Check the built engine
+        run: bun test tests/entry-assets.test.ts --test-name-pattern 'apps/review/dist/diagram-engine holds the engine'
+
+  claude-code-mod-windows:
+    # The Claude Code mod's Windows code on real Windows: Windows paths, the
+    # Git Bash lookup, the shell pick and its probe, every Windows PowerShell
+    # twin of the mod's scripts, and the compaction hook under Windows
+    # PowerShell and pwsh. The tests use temporary folders and a renamed
+    # ping.exe as the CLI: no Inbox, agent or real plannotator runs.
+    name: Claude Code mod (Windows)
+    needs: gate
+    if: ${{ !cancelled() && needs.gate.outputs.claude_code_mod != 'false' }}
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Run the mod's Windows tests
+        run: bun test apps/hook/hooks/mod/paths.test.ts apps/hook/hooks/mod/git-bash.test.ts apps/hook/hooks/mod/shell.test.ts apps/hook/hooks/mod/powershell.test.ts apps/hook/hooks/mod/inbox-reminder.test.ts apps/hook/hooks/mod/delivery.test.ts
+
   pi-extension-ai-runtime-windows:
     # Exercises the Pi extension's Node/jiti server mirror on Windows with an
     # npm-style `pi` shim pair. This catches regressions where `where pi`
     # resolves the extensionless shim before pi.cmd and the Ask AI provider
     # crashes before the plan review UI opens.
     name: Pi extension AI runtime (Windows)
-    if: github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'ci:full') && (github.event.action != 'labeled' || github.event.label.name == 'ci:full'))
+    needs: gate
+    if: ${{ !cancelled() && needs.gate.outputs.pi_runtime != 'false' }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -164,6 +232,19 @@ jobs:
       - name: Run workspace symlink tests
         run: bun test packages/server/review-workspace.test.ts --test-name-pattern discoverWorkspaceRepoPaths
 
+      # #2372: agent jobs start a stub pi.cmd (never a real agent CLI) through
+      # both servers' real spawn path; skipped off Windows.
+      - name: Run agent job .cmd shim tests (Bun server)
+        run: bun test packages/server/agent-jobs-windows-cmd-shim.test.ts
+
+      - name: Run agent job .cmd shim tests (Pi server)
+        run: bun test apps/pi-extension/server/agent-jobs-windows-cmd-shim.test.ts
+
+      # Inbox launch's Windows paths and env: PATH by any spelling, PowerShell commands run for real, Hidden and
+      # System folders, and a .cmd CLI through cmd.exe with a tree kill (stub scripts and node only).
+      - name: Run Inbox launch Windows tests
+        run: bun test packages/server/inbox-launch-windows.test.ts
+
       - name: Build Pi AI runtime smoke
         run: bun build scripts/smoke-pi-extension-ai-runtime.ts --target=node --outfile "$env:RUNNER_TEMP/pi-ai-runtime-smoke.mjs"
 
@@ -179,7 +260,8 @@ jobs:
     # settings.json fixture so the Gemini merge path actually executes and
     # any regression of #506 (or similar cmd-parser bugs) fails CI.
     name: install.cmd (Windows integration)
-    if: github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'ci:full') && (github.event.action != 'labeled' || github.event.label.name == 'ci:full'))
+    needs: gate
+    if: ${{ !cancelled() && needs.gate.outputs.install_cmd != 'false' }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -476,12 +558,20 @@ jobs:
     # This specifically covers PLANNOTATOR_DATA_DIR tilde expansion because
     # installer config lookup happens before any shared runtime code is loaded.
     name: install.ps1 (Windows integration)
-    if: github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'ci:full') && (github.event.action != 'labeled' || github.event.label.name == 'ci:full'))
+    needs: gate
+    if: ${{ !cancelled() && needs.gate.outputs.install_ps1 != 'false' }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+
+      # install.ps1's and install.cmd's data-dir resolution on real PowerShell
+      # and cmd.exe (#2305): home-only, XDG-only, stray, both, and more, in
+      # temp folders, without PLANNOTATOR_DATA_DIR (which skips the branch).
+      - name: Data-dir resolution in install.ps1 and install.cmd
+        shell: pwsh
+        run: .\scripts\check-data-dir-windows.ps1
 
       - name: Run install.ps1 end-to-end
         shell: pwsh
@@ -604,24 +694,3 @@ jobs:
             Set-Content -Path $hostsFile -Value $original -NoNewline
             ipconfig /flushdns | Out-Null
           }
-
-  # The merge script merges a PR only when every `Full CI (all green)` check on
-  # its head succeeded. A skipped job counts as passed elsewhere, so this job
-  # passes only when every job above ran and succeeded (the Qwen Code jobs may
-  # skip when qwen-gate found nothing for them).
-  full-ci:
-    name: Full CI (all green)
-    needs: [uninstall-windows, qwen-gate, qwen-installers-windows, pi-extension-ai-runtime-windows, install-cmd-windows, install-ps1-windows]
-    if: ${{ !cancelled() && github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:full') && (github.event.action != 'labeled' || github.event.label.name == 'ci:full') }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    steps:
-      - name: Every job above succeeded
-        env:
-          NEEDS: ${{ toJSON(needs) }}
-        run: |
-          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<< "$NEEDS"
-          jq -e 'all(to_entries[]; .value.result == "success"
-            or (.key == "qwen-installers-windows" and .value.result == "skipped"))
-            and .["qwen-gate"].result == "success"
-            and (.["qwen-gate"].outputs.run == "false" or .["qwen-installers-windows"].result == "success")' <<< "$NEEDS" > /dev/null

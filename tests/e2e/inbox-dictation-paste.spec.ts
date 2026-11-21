@@ -26,7 +26,7 @@
  * Build the binary first (see inbox.spec.ts), then `bun run test:e2e:inbox`.
  */
 
-import { expect, test, webkit, type Browser, type BrowserContext, type Locator, type Page } from '@playwright/test';
+import { expect, test, webkit, type Browser, type BrowserContext, type Locator, type Page } from './inbox-test';
 import { spawnSync } from 'node:child_process';
 import { existsSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -70,7 +70,7 @@ test.beforeAll(async ({ browser }) => {
   expect(existsSync(binary), `build the binary first: ${binary}`).toBe(true);
   const root = inboxScratch('plannotator-inbox-paste-e2e-');
   const dataDir = join(root, 'data');
-  const env = { PATH: process.env.PATH ?? '', HOME: root, PLANNOTATOR_DATA_DIR: dataDir, PLANNOTATOR_BROWSER: NO_BROWSER, PLANNOTATOR_INBOX_CONNECT: '0' };
+  const env = { PATH: process.env.PATH ?? '', HOME: root, PLANNOTATOR_RELAY_URL: 'http://127.0.0.1:9', PLANNOTATOR_DATA_DIR: dataDir, PLANNOTATOR_BROWSER: NO_BROWSER, PLANNOTATOR_INBOX_CONNECT: '0' };
   const started = spawnSync(binary, ['inbox', '--background'], { env, encoding: 'utf8', timeout: 60_000 });
   expect(started.status, started.stderr).toBe(0);
   rememberInboxOf(dataDir);
@@ -137,7 +137,7 @@ async function wordRect(on: Page, text: string, word: string): Promise<{ x: numb
  */
 async function openReply(on: Page): Promise<Locator> {
   const box = on.locator('section.ib-pane .ib-rbox textarea');
-  const button = on.locator('.ib-pfoot').getByRole('button', { name: /^(Reply|Edit draft)$/ });
+  const button = on.locator('.ib-pfoot').getByRole('button', { name: /^Reply$|Edit draft$/ });
   for (let attempt = 0; attempt < 10 && !(await box.isVisible()); attempt += 1) {
     await button.click({ timeout: 1_000 }).catch(() => {});
   }
@@ -177,7 +177,7 @@ test('the reply box: after a pick, after a click on the message, after a chip', 
   await dictate(page, 'After reading. ');
   await expectLanded(box, 'After reading.');
 
-  await page.locator('section.ib-pane .ib-rfoot button').first().click();
+  await page.locator('section.ib-pane .ib-rbox [data-reply-row] .ib-rchips button').first().click();
   await expect(box).not.toBeFocused();
   await dictate(page, 'After a chip. ');
   await expectLanded(box, 'After a chip.');
@@ -195,15 +195,17 @@ test('a press in the reply box beside its text (the row of chips) puts the caret
     await expect(box).toBeFocused();
     // An earlier test's picks may have drafted a reply: start from the person's own words.
     await box.fill('Typed first. ');
-    // The box is drawn as one field (its focus ring is always on); its lower part is the chips' row, not the textarea.
-    const outer = (await rbox.boundingBox())!;
+    // The box is drawn as one field (its focus ring is always on); its lower part is its row (Send, the tools, the chips),
+    // not the textarea.
     const text = (await box.boundingBox())!;
-    const chips = (await rbox.locator('.ib-rfoot').boundingBox())!;
-    expect(chips.y).toBeGreaterThanOrEqual(text.y + text.height - 1);
+    const row = (await rbox.locator('[data-reply-row]').boundingBox())!;
+    expect(row.y).toBeGreaterThanOrEqual(text.y + text.height - 1);
+    // The row's middle cell, right of the chips (the bin is past it, at the far right).
+    const chips = (await rbox.locator('[data-reply-row] .ib-rmid').boundingBox())!;
     // Leave the box (a click on the message), then press inside it, right of the chips, as a person clicks into a field.
     await p.getByText('I checked the 409 row.').click();
     await expect(box).not.toBeFocused();
-    await p.mouse.click(outer.x + outer.width - 24, chips.y + chips.height / 2);
+    await p.mouse.click(chips.x + chips.width - 8, chips.y + chips.height / 2);
     await expect(box).toBeFocused();
     await p.keyboard.type('Then typed. ');
     // Hex starts on Option (held, then released), then pastes with ⌘V.
@@ -266,6 +268,7 @@ test('a question card note: after a pick on the same card', async () => {
   await card.getByRole('button', { name: 'Add note' }).click();
   const note = card.getByPlaceholder('Context for the agent…');
   await expect(note).toBeFocused();
+  await note.evaluate((el) => el.scrollIntoView({ block: 'center' }));
   await dictate(page, 'Only if the flag is off by default. ');
   await expectLanded(note, 'Only if the flag is off by default.');
   await card.getByText('Yes', { exact: true }).click();
@@ -612,7 +615,7 @@ test('with image paste (#1953): an image pasted after a pick attaches once to th
 test('WebKit: after a pick, the paste goes back to the reply box', async () => {
   let browser: Browser | null = null;
   try {
-    browser = await webkit.launch();
+    browser = await webkit.launch({ args: [] });
   } catch (error) {
     test.skip(true, `WebKit is not installed here: ${(error as Error).message.split('\n')[0]}`);
     return;

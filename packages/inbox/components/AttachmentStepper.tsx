@@ -3,6 +3,7 @@ import { readInboxAttachmentKind, type InboxAttachmentState } from '@plannotator
 import { ImagePeek, type ImagePeekRow } from '@plannotator/ui/components/ImagePeek';
 import { Tooltip } from '@plannotator/ui/components/Tooltip';
 import { attachmentImageUrl, readableVersion } from '../attachments';
+import { drawnImageUrl, GALLERY_IMAGE_WIDTH } from '../images';
 import { Icon } from '../icons';
 import type { AttachmentStep } from '../stepping';
 import { changedLine } from './AttachmentTiles';
@@ -28,6 +29,8 @@ export interface AttachmentStepperProps {
   endNote: string | null;
   /** Annotations waiting for a Send, by file path (the counts on the peek's thumbnails). */
   annotationCounts: ReadonlyMap<string, number>;
+  /** What the peek lists when `steps` is fewer than the thread's files (a question's picture choices): every file. Absent: `steps`. */
+  peek?: { steps: readonly AttachmentStep[]; index: number; onGo: (index: number) => void };
 }
 
 /** The short label a file without a thumbnail shows in the peek: its extension ("MD", "PDF"), else its kind. */
@@ -52,7 +55,8 @@ export function peekRows(steps: readonly AttachmentStep[], counts: ReadonlyMap<s
     row.items.push({
       key: attachment.id,
       name: attachment.name,
-      thumb: isImage ? attachmentImageUrl(attachment, readableVersion(attachment)) : null,
+      // A cell is a few hundred pixels wide: a big screenshot loads as the gallery's smaller copy, never the original (images.ts).
+      thumb: isImage ? drawnImageUrl(attachmentImageUrl(attachment, readableVersion(attachment)), attachment.width, GALLERY_IMAGE_WIDTH) : null,
       tile: peekTile(attachment),
       count: counts.get(attachment.path) ?? 0,
       attached: !step.inline,
@@ -83,6 +87,12 @@ export function FilePeek(props: {
   onClose: (reason: 'key' | 'outside') => void;
   onGo: (index: number) => void;
   /**
+   * What ‹ Previous and Next › step through when it is not `steps` (a
+   * question's picture choices, the sheet still listing every file), and
+   * what they call each one. Absent: `steps`, files.
+   */
+  within?: { steps: readonly AttachmentStep[]; index: number; noun: 'option' };
+  /**
    * A phone's sheet: ‹ Previous and Next › above the files (the owner's answer
    * for files a swipe cannot step; shown for every file, so the sheet is the
    * same everywhere). `onStep` steps (the host closes the sheet); at an end the
@@ -93,15 +103,17 @@ export function FilePeek(props: {
   const { steps, phone, index } = props;
   const rows = useMemo(() => peekRows(steps, props.annotationCounts), [steps, props.annotationCounts]);
   const onStep = props.onStep;
-  const prev = steps[index - 1];
-  const next = steps[index + 1];
+  const stepping = props.within ?? { steps, index, noun: 'file' as const };
+  const prev = stepping.steps[stepping.index - 1];
+  const next = stepping.steps[stepping.index + 1];
+  const noun = stepping.noun;
   const header =
     phone && onStep ? (
-      <div className="ib-peekstep" role="group" aria-label="Step through the files" data-peek-step="">
+      <div className="ib-peekstep" role="group" aria-label={`Step through the ${noun}s`} data-peek-step="">
         <button
           type="button"
           className="ib-peekstep-b"
-          aria-label={prev ? `Previous file: ${prev.attachment.name}` : 'Previous file: this is the first'}
+          aria-label={prev ? `Previous ${noun}: ${prev.attachment.name}` : `Previous ${noun}: this is the first`}
           aria-disabled={prev ? undefined : true}
           onClick={() => onStep(-1)}
           data-peek-step-prev=""
@@ -110,12 +122,12 @@ export function FilePeek(props: {
           <span>Previous</span>
         </button>
         <span className="ib-peekstep-n" aria-hidden="true">
-          {index + 1} of {steps.length}
+          {stepping.index + 1} of {stepping.steps.length}
         </span>
         <button
           type="button"
           className="ib-peekstep-b"
-          aria-label={next ? `Next file: ${next.attachment.name}` : 'Next file: this is the last'}
+          aria-label={next ? `Next ${noun}: ${next.attachment.name}` : `Next ${noun}: this is the last`}
           aria-disabled={next ? undefined : true}
           onClick={() => onStep(1)}
           data-peek-step-next=""
@@ -208,7 +220,8 @@ export function AttachmentStepper(props: AttachmentStepperProps) {
     }
   };
 
-  const peek = menuOpen && <FilePeek id={peekId} steps={steps} index={index} phone={false} annotationCounts={props.annotationCounts} onClose={close} onGo={props.onGo} />;
+  const listed = props.peek ?? { steps, index, onGo: props.onGo };
+  const peek = menuOpen && <FilePeek id={peekId} steps={listed.steps} index={listed.index} phone={false} annotationCounts={props.annotationCounts} onClose={close} onGo={listed.onGo} />;
 
   const endNote = (
     <span className={`ib-endnote${props.endNote ? ' ib-on' : ''}`} aria-hidden="true" data-step-end-note="">

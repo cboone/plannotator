@@ -62,7 +62,8 @@ test("the probe refuses a data directory belonging to its simulated home", async
   const root = mkdtempSync(join(scratch, "real-data-guard-"));
   const dataDir = join(root, ".plannotator");
   const child = Bun.spawn([process.execPath, entry, "manual"], {
-    env: { ...fixtureEnv(root), PLANNOTATOR_DATA_DIR: dataDir }, stdout: "pipe", stderr: "pipe",
+    env: { ...fixtureEnv(root), PLANNOTATOR_RELAY_URL: "http://127.0.0.1:9", PLANNOTATOR_DATA_DIR: dataDir },
+    stdout: "pipe", stderr: "pipe",
   });
   const [err, code] = await Promise.all([new Response(child.stderr).text(), child.exited]);
   expect(code).toBe(1);

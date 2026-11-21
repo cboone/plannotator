@@ -49,6 +49,33 @@ describe('connect snippets', () => {
     expect(JSON.stringify(panel)).not.toContain('qwen mcp add');
   });
 
+  // Over MCP the Inbox cannot tell DSH sessions apart (DSH strips DSH_* from MCP servers), and a reply never wakes one.
+  test('the DeepSeek Harness panel installs Plannotator\'s plugin and never offers the MCP command', () => {
+    expect(HARNESSES.some((h) => h.id === 'dsh' && h.label === 'DeepSeek Harness')).toBe(true);
+    const panel = harnessPanel('dsh', ctx('/opt/plannotator'));
+    const text = JSON.stringify(panel);
+    expect(panel.artefacts[0]).toEqual({ kind: 'code', text: 'dsh plugin --profile <profile> add @plannotator/dsh' });
+    expect(text).not.toContain('inbox mcp');
+    expect(text).not.toContain('/opt/plannotator');
+  });
+
+  test("the Cline panel installs Plannotator's plugin first, and keeps the MCP server for the extension's Legacy version", () => {
+    expect(HARNESSES.some((h) => h.id === 'cline' && h.label === 'Cline')).toBe(true);
+    const panel = harnessPanel('cline', ctx('/opt/plannotator'));
+    expect(panel.artefacts[0]).toEqual({ kind: 'code', text: 'cline plugin install npm:@plannotator/cline' });
+    const another = JSON.stringify(panel.another);
+    expect(another).toContain('mcpServers');
+    expect(another).toContain('/opt/plannotator');
+  });
+
+  test("the Hermes Agent panel installs Plannotator's plugin and lets it start a turn with the reply, as two commands", () => {
+    expect(HARNESSES.some((h) => h.id === 'hermes' && h.label === 'Hermes Agent')).toBe(true);
+    expect(harnessPanel('hermes', ctx('/opt/plannotator')).artefacts).toEqual([
+      { kind: 'code', text: 'hermes plugins install backnotprop/plannotator/apps/hermes-plugin --enable' },
+      { kind: 'code', text: 'hermes config set plugins.entries.plannotator.allow_gateway_injection true' },
+    ]);
+  });
+
   test('every harness has a panel, and every JSON snippet parses', () => {
     for (const harness of HARNESSES) {
       const panel = harnessPanel(harness.id, ctx('/opt/plannotator'));

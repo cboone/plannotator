@@ -1,8 +1,8 @@
 import type { CodeAnnotation } from '@plannotator/ui/types';
-import type { DraftTransport } from '@plannotator/ui/hooks/useAnnotationDraft';
+import { missingDraftGeneration, type DraftTransport } from '@plannotator/ui/hooks/useAnnotationDraft';
 import { DraftTargetChangedError } from '@plannotator/ui/hooks/useCodeAnnotationDraft';
 import type { DiffFile } from '../types';
-import { captureAnchor } from './codeAnnotationAnchor';
+import { captureAnchor } from '@plannotator/ui/utils/codeAnnotationAnchor';
 
 /** Older exact-patch drafts have no target stamp; adopt it once on restore. */
 export function withLocalReviewTarget(
@@ -31,14 +31,14 @@ export function localReviewDraftTransport(target: string, clientId: string): Dra
       // Generation conflicts also use 409; those are not a target switch.
       if (conflict?.code === 'draft_target_changed') throw new DraftTargetChangedError();
     }
-    if (!response.ok && !(response.status === 404 && !init?.method)) throw new Error('Could not persist review draft; the review target may have changed.');
+    if (!response.ok) throw new Error('Could not persist review draft; the review target may have changed.');
     return response;
   };
   return {
     async load() {
       const response = await request();
-      const data = await response.json();
-      return response.ok ? { data, generation: null } : { data: null, generation: data.draftGeneration ?? null };
+      if (response.status === 204) return { data: null, generation: missingDraftGeneration(response) };
+      return { data: await response.json(), generation: null };
     },
     async save(body, { keepalive }) {
       await request('', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), keepalive });

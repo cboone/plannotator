@@ -65,7 +65,7 @@ Version pinning is fully supported from **v0.17.2 onwards**. v0.17.2 is the firs
 <details>
 <summary><strong>Optional Call flow runtime (not installed by default)</strong></summary>
 
-Code review's **Call flow** layer uses a pinned, pruned CallDiff runtime and needs Node.js 22 or newer, so it is never installed by default. The normal path is in-app: the Call flow toggle names the changed languages and estimated total, and enabling it consents to one background install of the core (about 5 MB on macOS arm64) plus only the needed grammar packs. There is no second confirmation. If a later review introduces another language, installed languages are still analyzed while that pack installs automatically and a quiet skipped-files notice reports progress. Each target gets one automatic attempt per review session; after a failure, the panel shows a Retry action. The panel's **Languages** list shows cumulative installed size and supports installing a pack ahead of need.
+Code review's **Call flow** layer uses a pinned, pruned CallDiff runtime and needs Node.js 22.18 or newer, so it is never installed by default. The normal path is in-app: the Call flow toggle names the changed languages and estimated total, and enabling it consents to one background install of the core (about 5 MB on macOS arm64) plus only the needed grammar packs. There is no second confirmation. If a later review introduces another language, installed languages are still analyzed while that pack installs automatically and a quiet skipped-files notice reports progress. Each target gets one automatic attempt per review session; after a failure, the panel shows a Retry action. The panel's **Languages** list shows cumulative installed size and supports installing a pack ahead of need.
 
 For scripted or headless installs, `--with-call-flow` (PowerShell: `-WithCallFlow`), `PLANNOTATOR_INSTALL_CALLDIFF=1`, `{ "installCallFlow": true }`, and `plannotator install-runtime call-flow` install the core; review-specific packs remain selectable in the UI. `--minimal` always excludes it.
 
@@ -74,7 +74,7 @@ For scripted or headless installs, `--with-call-flow` (PowerShell: `-WithCallFlo
 <details>
 <summary><strong>Binary-only install (nothing but the CLI)</strong></summary>
 
-Pass `--minimal` (aliased `--binary-only`) to install **only** the `plannotator` binary — no sem semantic-diff sidecar, no CallDiff runtime, no agent-terminal runtime, and none of the per-agent skills, hooks, slash commands, or config for Claude, Codex, OpenCode, Gemini, or Kiro. The only thing installed is the binary (the Windows PowerShell installer also adds the install directory to your user `PATH`), and because it skips the sparse checkout, **minimal mode does not require `git`**.
+Pass `--minimal` (aliased `--binary-only`) to install **only** the `plannotator` binary — no CallDiff runtime, no agent-terminal runtime, and none of the per-agent skills, hooks, slash commands, or config for Claude, Codex, OpenCode, Gemini, or Kiro. The only thing installed is the binary (the Windows PowerShell installer also adds the install directory to your user `PATH`), and because it skips the sparse checkout, **minimal mode does not require `git`**.
 
 ```bash
 curl -fsSL https://plannotator.ai/install.sh | bash -s -- --minimal
@@ -153,7 +153,7 @@ Every few minutes (at most once every ten minutes, and when the Inbox starts or 
 - plan review, annotate and code review show a short toast at most once a day, with **Update** (or the command to copy, on Pi: `pi update --extensions`), and the Options menu shows the right update command for your agent;
 - a review you started yourself in a terminal ends with one line: `Plannotator X is available (you have Y). Update: plannotator update`.
 
-Turn the check off with **Settings → General → Tell me when a new version is out** (the Inbox: **Settings → About**), with `{ "updateCheck": false }` in `~/.plannotator/config.json` or `PLANNOTATOR_UPDATE_CHECK=0`. Off makes no automatic request to GitHub at all (and stops auto-update, which needs the check); `plannotator update` still checks when you run it.
+Turn the check off with **Settings → General → Tell me when a new version is out** (the Inbox: **Settings → About**), with `{ "updateCheck": false }` in `~/.plannotator/config.json` or `PLANNOTATOR_UPDATE_CHECK=0`. Off makes no automatic request to GitHub at all (and stops auto-update, which needs the check). You can still update: `plannotator update` and the Inbox's **Check now** check when you ask, and the Inbox keeps its **Update** button for a release it already knows of.
 
 ### Automatic updates (opt-in)
 
@@ -201,6 +201,11 @@ Host integrations are always part of uninstall. If a broken or unavailable
 host prevents safe cleanup, the command names the blocking plugin manager or
 configuration, gives exact manual cleanup instructions, and stops before
 deleting the binary. Complete that cleanup and rerun uninstall.
+It also keeps the binary when an agent's config file can't be read (another
+tool's too), or when a hook it did not install still runs Plannotator. The
+error names the file, the tool, and what to do. A `plannotator-inbox` entry
+you added yourself, or a Claude Code or Droid plugin installed for one project,
+is named with how to remove it and does not keep the binary.
 
 The purge removes only known Plannotator entries from the configured data
 directory. Unknown top-level files are preserved rather than guessed at, and
@@ -361,6 +366,18 @@ Re-running the installer leaves an unchanged extension alone. A new extension ve
 After you approve a plan in Plannotator, Qwen Code asks you to confirm it once more in the terminal. Qwen Code does not let a hook approve a tool that needs the user, and `exit_plan_mode` is one. Feedback you send instead goes to the agent at once.
 
 To install the extension by hand from a Plannotator checkout: `qwen extensions install ./apps/qwen-code/extension --consent`. `plannotator uninstall` removes it.
+
+## T3 Code
+
+Claude threads in T3 Code get the Inbox from the [Claude Code plugin](#claude-code), with nothing to set up in T3 (Plannotator 0.28.65 or newer, Claude Code 2.1.287 or newer). While T3 keeps a thread's Claude running, your reply arrives in that thread as a new turn. T3 stops an idle Claude after about 30 minutes. To deliver replies after that, sign Plannotator in to T3 once:
+
+```bash
+plannotator t3 login --url <T3 MCP URL>
+```
+
+For the MCP URL, open T3 **Settings → Environments**, open the environment's menu and choose **Copy MCP URL**. On T3's sign-in page, choose Supervised or higher, at least the mode your threads run in: Read only cannot send replies. A reply that waits for the sign-in says so in the Inbox. Only Claude threads in T3 get replies; Codex and other agents in T3 read the reply when they next check the Inbox.
+
+With the Claude Code mod off, or a Claude Code older than 2.1.287, the plugin adds no tool. Sign in as above and add the server for T3 threads instead: `claude mcp add -s user plannotator-inbox -- plannotator inbox mcp --t3` (it shows its tools only inside T3 threads). `plannotator t3 --help` has the details.
 
 ## Kilo Code
 

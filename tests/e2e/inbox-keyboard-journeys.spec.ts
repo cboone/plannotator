@@ -14,7 +14,7 @@
  * F is full screen for now (never saved as the view files open in); S2 also
  * takes the Full screen button, by Tab, which is a choice that is saved.
  */
-import { devices, expect, test, webkit, type Browser, type BrowserContext, type Locator, type Page } from '@playwright/test';
+import { devices, expect, test, webkit, type Browser, type BrowserContext, type Locator, type Page } from './inbox-test';
 import { mkdirSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import { createKeyboardWorld, type KeyboardWorld } from './inbox-keyboard-world';
@@ -283,8 +283,8 @@ test('S1: deep work in one thread, a detour, and back', async () => {
   await arrowTo(rollout);
   await press('Enter');
   await at('Rollout open', { focus: row(rollout), address: addr(rollout), view: 'thread' });
-  // The six read messages are folded: the first and the last as lines, the middle ones behind "N earlier messages".
-  await expect(earlier()).toHaveText(/^\d+ earlier messages$/);
+  // The six read messages are folded: the first and the last as lines, the middle ones behind "Show N earlier".
+  await expect(earlier()).toHaveText(/^Show \d+ earlier$/);
   expect(await foldedCount()).toBeGreaterThanOrEqual(2);
 
   // N carries from the list into the thread: the first new message (7).
@@ -363,7 +363,7 @@ test('S1: deep work in one thread, a detour, and back', async () => {
   await press(']', ']', '[');
   await expect.poll(fileName).toContain(world.files.planPage);
   await focusHeld();
-  // On an HTML page the first Escape leaves Annotate for Interact (the viewer's own layer); then full screen goes.
+  // An HTML page in Annotate takes one Escape to Interact first (the viewer's own layer); then full screen goes.
   for (let i = 0; i < 3 && (await page.locator('[data-attachment-pane][data-full-view]').count()) > 0; i++) await press('Escape');
   await viewIs('side');
   await press('Escape');
@@ -409,7 +409,7 @@ test('S1: deep work in one thread, a detour, and back', async () => {
   // Rollout is as it was left: the draft comes back in the box (focus stays on the row), with both comments; the
   // row is still read. Reopened, the read messages fold again (the Inbox's rule for a thread opened; finding F4).
   await expect(box).toHaveValue('Holding EU until Monday; going to everyone else today.');
-  await expect(page.locator('section.ib-pane').getByText(/^2 annotations$/)).toBeVisible();
+  await expect(page.locator('section.ib-pane').getByText(/^2 comments$/)).toBeVisible();
   expect({ bold: await row(rollout).evaluate((el) => el.classList.contains('ib-u')), section: await row(rollout).getAttribute('data-section') }, 'the row reads as it did').toEqual(rolloutLookBefore);
   await press('r');
   await expect(box).toBeFocused();
@@ -699,8 +699,8 @@ test('J1: triage the list and open the newest thread', async () => {
   await viewIs('list');
   await press('End', 'Home');
   await at('End Home', { focus: row(stopped), address: addr(null), view: 'list' });
-  // No thread open: J and K move along the rows as ↓ ↑ do (the next thread there), and open nothing.
-  const second = page.locator('.ib-main .ib-lbody').locator('[data-thread-id], button.ib-band').filter({ visible: true }).nth(1);
+  // No thread open: J and K move along the threads (the next one there, past the groups' headers), and open nothing.
+  const second = page.locator('.ib-main .ib-lbody').locator('[data-thread-id]').filter({ visible: true }).nth(1);
   await press('j');
   await at('J on the list', { focus: second, address: addr(null), view: 'list' });
   await press('k', 'k');
@@ -876,7 +876,9 @@ test('J3: answer a question and send a reply; letters typed are words', async ()
   await load(`#thread=${stopped}`);
   await expect(page.locator('section.ib-pane')).toBeVisible();
   await press('n');
-  await tabTo(questionChoice(0));
+  // N does nothing in a one-message thread, so the Tab walk starts at the top of the page: Skip to the
+  // list (approval "inbox-keyboard-keys-2026-11-07", item 6), the sidebar, the list, then the thread.
+  await tabTo(questionChoice(0), { max: 60 });
   await press('ArrowDown');
   await press('Space');
   await expect(questionChoice(1)).toBeChecked();

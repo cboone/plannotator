@@ -6,15 +6,18 @@ import { imageReferenceIndex, imageSourceLine, regionOf } from './ImageRegions';
 import { AnnotationType, type Block, type Annotation, type EditorMode, type InputMethod, type ImageAttachment, type ActionsLabelMode, type HostDraft } from '../types';
 import { applyHighlight, codeBlockClassName, onCodeHighlightSwap } from '../utils/codeHighlight';
 import { paintCodeBlockMark } from '../utils/codeBlockMark';
+import { documentOpenInLine } from '../utils/openInLine';
 import { useFenceTheme } from '../hooks/useFenceTheme';
-import { computeListIndices, groupBlocks, selectionSourceLines, type Frontmatter, type FrontmatterValue } from '../utils/parser';
+import { computeListIndices, extractFrontmatter, groupBlocks, selectionSourceLines, type Frontmatter, type FrontmatterValue } from '../utils/parser';
 import { buildHeadingSlugMap } from '../utils/slugify';
 import { copyTextToClipboard } from '../utils/clipboard';
 import { getRichCopyEnabled } from '../utils/richCopyPolicy';
 import { BlockRenderer } from './BlockRenderer';
+import { sourceLineAttrs } from '../utils/sourceLineAttrs';
 import { BELOW_TITLE_SLOT_MARKER } from '../utils/belowTitleSlot';
-import { indexQuestionBlocks, type IndexedQuestion, type ParsedQuestion, type QuestionAnswer } from '@plannotator/core/question-block';
-import type { QuestionBlockProps } from './blocks/QuestionBlock';
+import { indexQuestionBlocks, isQuestionDirectiveKind, type IndexedQuestion, type ParsedQuestion, type QuestionAnswer } from '@plannotator/core/question-block';
+import { diagramTargetText, type DiagramAnchor } from '@plannotator/core/diagram-anchor';
+import type { QuestionAcceptBehavior, QuestionBlockProps } from './blocks/QuestionBlock';
 import { resolveQuestionAnswers } from '../utils/questionAnswers';
 import { CodeBlock } from './blocks/CodeBlock';
 import { TableBlock } from './blocks/TableBlock';
@@ -71,24 +74,32 @@ class ToolbarErrorBoundary extends React.Component<
   }
 }
 
-import { CommentPopover, type CommentAskAIHandler } from './CommentPopover';
-import { TaterSpriteSitting } from './TaterSpriteSitting';
+import { CommentPopover, hasCommentDraft, type CommentAskAIHandler } from './CommentPopover';
+import { TaterSittingSlot } from './TaterSpriteSlots';
 import { AttachmentsButton } from './AttachmentsButton';
 import { MessagesIcon } from './icons/MessagesIcon';
 import { DiagramAnchorClaims, DiagramAnchorClaimsContext } from './diagram/anchorClaims';
 import { DiagramBlockPending } from './diagram/DiagramPending';
+import type { DiagramReopenRequest } from './diagram/reopen';
 import { LazyBlockBoundary } from './LazyBlockBoundary';
 import { isGraphvizLanguage, isMermaidLanguage } from './diagramLanguages';
 import { isHtmlEmbedLanguage, isSvgFenceLanguage } from './html-embed/languages';
 import type { HtmlEmbedHost } from './html-embed/HtmlEmbedBlock';
 import { getIdentity } from '../utils/identity';
 import { type QuickLabel } from '../utils/quickLabels';
-import type { SelectionAction } from '../utils/selectionActions';
+import type { SelectionAction, SelectionActionContext } from '../utils/selectionActions';
 import type { MentionSource } from '../utils/mentions';
 import { DocBadges, type DocBadgesProps, type LinkedDocBadgeInfo } from './DocBadges';
+import { legacyBadgesMaxWidth } from './docBadgesWidth';
 import { PinpointOverlay } from './PinpointOverlay';
 import { usePinpoint } from '../hooks/usePinpoint';
-import { useAnnotationHighlighter, type AnnotationRestoreReport } from '../hooks/useAnnotationHighlighter';
+import { useClickWord } from '../hooks/useClickWord';
+import { getClickAWord } from '../utils/clickAWordPolicy';
+import { useAnnotationHighlighter, type AnnotationRestoreReport, type CommentDraftShelf } from '../hooks/useAnnotationHighlighter';
+import { getVisibleCommentDrafts } from '../utils/commentCardPolicy';
+import { shelveCommentDraft, shelvedCommentDrafts } from '../utils/commentDraftShelf';
+import { CommentDraftBadges } from './CommentDraftBadges';
+import { CommentDraftScopeContext } from '../utils/commentDraftScope';
 import { useVimSelection } from '../hooks/useVimSelection';
 import {
   getScrollViewportIntersectionRoot,
@@ -104,6 +115,8 @@ import {
   resolveCompactHeaderGeometry,
   snapCompactHeaderWidth,
 } from './compactHeaderLayout';
+
+const asksQuestion = (block: Block): boolean => block.type === 'directive' && isQuestionDirectiveKind(block.directiveKind || 'note');
 
 /** Typed controls required for Viewer's opt-in, in-flow annotation header. */
 export interface ViewerAnnotationHeaderConfig {
@@ -127,6 +140,18 @@ export interface ViewerProps {
    *  both toolbars. Absent → the package's own wand. */
   selectionActionsIcon?: React.ReactNode;
   /**
+   * Opt-in host capability, passed to the text-selection toolbar only: its
+   * "Side" button, which hands the host the selected text and its context
+   * (AnnotationToolbar `onSide`). Absent → no button: unchanged.
+   */
+  onSide?: (text: string, context: SelectionActionContext) => void;
+  /**
+   * Opt-in host capability: how that button is drawn (AnnotationToolbar
+   * `sideButton`: an icon-only button with the host's glyph and tooltip).
+   * Absent → the two bubbles and the word "Side": unchanged.
+   */
+  sideButton?: { icon?: React.ReactNode; label: string };
+  /**
    * Whether the package's quick labels are offered on the selection toolbars
    * (default true). `false` hides the Zap picker and the Alt+digit label
    * shortcuts; the 👍 button is unaffected.
@@ -148,6 +173,12 @@ export interface ViewerProps {
   selectedAnnotationId: string | null;
   mode: EditorMode;
   inputMethod?: InputMethod;
+  /**
+   * Click a word (Select input method): one click on a word highlights it.
+   * Absent: `configurePlannotatorUI({ clickAWord })`, default on. This prop
+   * wins over that.
+   */
+  clickAWord?: boolean;
   taterMode: boolean;
   globalAttachments?: ImageAttachment[];
   onAddGlobalAttachment?: (image: ImageAttachment) => void;
@@ -313,6 +344,26 @@ export interface ViewerProps {
    *  Plannotator Inbox passes true. The prompt, key, choices and numbering
    *  are the same either way. */
   questionContractLines?: boolean;
+  /** Whether `:::question` cards read option lines (core
+   *  `ParseQuestionBlockOptions.optionLines`): `Pros:`, `Cons:` and
+   *  `Prototype:` indented under a `- [ ]` choice, and a question's own
+   *  `Prototype:` line. A card whose choices have Pros or Cons then draws a
+   *  closed "Trade-offs" line under Why that opens into a table (see
+   *  `QuestionBlock`). Default false: each line shows as text, as before
+   *  (today's card). The Plannotator Inbox passes true. */
+  questionOptionLines?: boolean;
+  /** Whether `:::question` cards read change lines (core
+   *  `ParseQuestionBlockOptions.changeLines`): `Where:`, `Before:`, `After:`
+   *  and `Source:` at the block's indent, and `Before:` / `After:` under a
+   *  `- [ ]` choice. The card then draws the Where with a pin, each place's
+   *  Now / After, and each choice's own version (see `QuestionChange`).
+   *  Default false: each line shows as text, as before (today's card). The
+   *  Plannotator Inbox passes true. */
+  questionChangeLines?: boolean;
+  /** Host content right after a question's choices (the Plannotator Inbox's
+   *  "Try prototype" tab; see `QuestionBlock` `renderAfterChoices`). Absent:
+   *  today's card. */
+  renderQuestionAfterChoices?: (question: IndexedQuestion) => React.ReactNode;
   /** Whether picture choices (`- [ ] Label — ![alt](path)`) draw as picture
    *  tiles (default true; see `QuestionBlock` `pictureChoices`). False: text
    *  rows. */
@@ -320,6 +371,18 @@ export interface ViewerProps {
   /** A small label over each picture tile's picture (see `QuestionBlock`
    *  `pictureBadge`); absent: none. */
   questionPictureBadge?: (choice: { label: string; image: { alt: string; src: string } }) => string | null;
+  /** A picture tile's zoom, told its question's key and the choice's index (see
+   *  `QuestionBlock` `onZoomChoice`). Absent: the zoom opens the picture
+   *  through `onImageClick`, as before. */
+  onQuestionPictureZoom?: (key: string, index: number, url: string, alt: string) => void;
+  /** A picture choice's size in pixels, given the URL its picture loads from,
+   *  when the host knows it before the picture loads (see `QuestionBlock`
+   *  `pictureSize`). Absent: unknown, and nothing changes. */
+  questionPictureSize?: (url: string) => { width: number; height: number } | null;
+  /** Accept recommended, gentler: steps aside while a card field has focus, keeps
+   *  Other… words, tells the host so it can offer Undo (see `QuestionBlock`
+   *  `acceptBehavior`). Absent: today's button. */
+  questionAcceptBehavior?: QuestionAcceptBehavior;
   /** Makes a question's "Records a decision" tag a toggle button
    *  (`aria-pressed`); a click calls this with the question's key and the
    *  next state, which the host stores and returns from
@@ -401,14 +464,35 @@ export interface ViewerProps {
    * Opt-in host capability, with `answerOnly`: the reader may comment on the
    * text. A text selection opens the selection toolbar, comment-only
    * (Comment and the one-click 👍; no Delete, no label picker), and its
-   * comment composer; `annotations` are drawn as highlights. Question cards
-   * are left out of selection (their text is not commented on), and nothing
-   * else of authoring comes back (no pinpoint, code-block toolbar, Global
-   * comment or Copy, no Vim). For a host that shows a message whose words
-   * can be commented on (the Plannotator Inbox's agent messages). Ignored
-   * without `answerOnly` and under `readOnly`. Absent → unchanged.
+   * comment composer; `annotations` are drawn as highlights. A rendered
+   * diagram takes comments on its parts the same way (`onAddAnnotation` gets
+   * a row with `diagramAnchor`). Question cards are left out of selection
+   * (their text is not commented on), and nothing else of authoring comes
+   * back (no pinpoint, code-block toolbar, Global comment or Copy, no Vim).
+   * For a host that shows a message whose words can be commented on (the
+   * Plannotator Inbox's agent messages). Ignored without `answerOnly` and
+   * under `readOnly`. Absent → unchanged.
    */
   textComments?: boolean;
+  /**
+   * Opt-in, with `textComments`: the comment-only selection toolbar also
+   * offers Delete (a DELETION on the words selected, as everywhere else).
+   * The label picker stays off. Absent → unchanged.
+   */
+  textDeletions?: boolean;
+  /**
+   * Opt-in, with `textComments`: question cards take comments too, as they do
+   * in plan review: the prompt, its context, and each choice's label and
+   * description are ordinary text for the selection toolbar and the
+   * highlights; the card's own controls (the radios and checkboxes,
+   * "Other…", the footer, a picture choice's picture) stay out. A click on a
+   * choice still picks it at once; a drag across its words, or a double-click
+   * on one, selects them and never picks (the card's own guard). For a host
+   * whose reader comments on a whole message, questions included (the
+   * Plannotator Inbox). A host's own card (`renderQuestionCard`) stays out.
+   * Absent → unchanged (cards are left out of selection).
+   */
+  questionTextComments?: boolean;
   /**
    * Opt-in: words a text-selection comment box opens with, for the selected
    * text (a host's suggested comment, kept with one press or written over).
@@ -464,18 +548,49 @@ export interface ViewerHandle {
   /** Markdown `Viewer` only: scroll a heading anchor (`#id`) into view.
    *  Returns false when it is not in this document. */
   scrollToAnchor?: (hash: string) => boolean;
+  /** Raw-HTML `HtmlViewer` only: print the document itself so its page breaks
+   *  paginate instead of being flattened inside the host's iframe. */
+  print?: () => void;
   /** `HtmlViewer` only: move a pinned draft to the element around it
    *  (`'parent'`) or back in (`'child'`), for a host that composes
    *  (`onHostDraft`). The markdown `Viewer` does not implement it. */
   stepPin?: (direction: 'parent' | 'child') => void;
   /** `HtmlViewer` only: scroll the pinned draft into the middle of the
-   *  frame, for a host whose panel covers part of it. */
-  revealPin?: () => void;
+   *  frame, for a host whose panel covers part of it. `clearBottom`: the
+   *  panel floats over the frame's last pixels instead of shrinking it, so the
+   *  pin goes into the part left, and stays put if it is already there. */
+  revealPin?: (options?: { clearBottom?: number }) => void;
   /** Markdown `Viewer` only, for a host that composes (`onHostDraft`) on a
    *  touch screen: make the page's text selection a draft now (the host's own
    *  Comment action), reported through `onHostDraft` as `'selection'`.
    *  Returns false when nothing in the document is selected. */
   takeSelection?: () => boolean;
+  /**
+   * Opt-in, for a host that keeps a comment being written when its file
+   * closes: open the comment composer again on what `annotation` is on (its
+   * anchor, found the way `annotations` are drawn), holding `annotation.text`
+   * as words not saved yet. Nothing is saved until the person saves it; the
+   * composer's own close and Escape act as for any comment. May be called
+   * right after mount: it opens once the document is drawn. Returns false
+   * when this viewer cannot reopen that kind of comment. `onMissing` runs
+   * (once, possibly later) when the anchor is not found in the document, so
+   * the host can keep the words some other way. Markdown `Viewer`: a text
+   * selection, a global comment, a diagram part. `HtmlViewer`: a pin or a
+   * text selection (with `onHostDraft`, the draft is handed to the host,
+   * which keeps the words itself).
+   */
+  reopenComment?: (annotation: Annotation, onMissing?: () => void) => boolean;
+  /**
+   * The comment being written in the viewer's own composer, as the comment
+   * its submit would add, with empty words (the host reads them from the
+   * box), or null when none is open. Reads only: nothing is added, closed or
+   * focused, so a host can call it at any time, also while it is being taken
+   * away (the Inbox keeps the comment as the file's draft then). Markdown
+   * `Viewer`: a text selection's comment, the global comment, a code block's,
+   * a diagram part's (`diagramAnchor`). `HtmlViewer`: a pin's or a text
+   * selection's comment.
+   */
+  peekComment?: () => Annotation | null;
 }
 
 interface CodeBlockToolbarTarget {
@@ -557,12 +672,14 @@ const FrontmatterRow: React.FC<{ field: string; value: FrontmatterValue }> = ({ 
 /**
  * Renders YAML frontmatter as a styled metadata card.
  */
-const FrontmatterCard: React.FC<{ frontmatter: Frontmatter }> = ({ frontmatter }) => {
+const FrontmatterCard: React.FC<{ frontmatter: Frontmatter; markdown: string }> = ({ frontmatter, markdown }) => {
   const entries = Object.entries(frontmatter);
   if (entries.length === 0) return null;
+  const { contentStartLine } = extractFrontmatter(markdown);
+  const end = Math.max(1, contentStartLine - 1);
 
   return (
-    <div className="mt-4 mb-6 p-4 bg-muted/30 border border-border/50 rounded-lg" data-doc-text="">
+    <div className="relative mt-4 mb-6 p-4 bg-muted/30 border border-border/50 rounded-lg" data-doc-text="" {...sourceLineAttrs(undefined, { startLine: 1, endLine: end })}>
       <div className="grid gap-2 text-sm">
         {entries.map(([key, value]) => (
           <FrontmatterRow key={key} field={key} value={value} />
@@ -645,6 +762,7 @@ const StickyActionsLane: React.FC<{ className: string; children: React.ReactNode
       {/* After the lane: the lane is a flex box, so a float placed before it would narrow it. */}
       <div
         data-print-hide
+        data-sticky-actions-spacer
         aria-hidden="true"
         className="float-right"
         style={box ? { width: box.width, height: box.height, marginTop: box.marginTop, marginRight: box.marginRight } : undefined}
@@ -781,9 +899,12 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   selectedAnnotationId,
   mode,
   inputMethod = 'drag',
+  clickAWord: clickAWordProp,
   taterMode,
   selectionActions,
   selectionActionsIcon,
+  onSide,
+  sideButton,
   quickLabels,
   mentionSource,
   globalAttachments = [],
@@ -833,8 +954,14 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   questionDecisionScope,
   questionDecisionLines = true,
   questionContractLines = false,
+  questionOptionLines = false,
+  questionChangeLines = false,
+  renderQuestionAfterChoices,
   questionPictureChoices = true,
   questionPictureBadge,
+  onQuestionPictureZoom,
+  questionPictureSize,
+  questionAcceptBehavior,
   onToggleQuestionDecisionRecording,
   onOpenQuestionDecision,
   questionDecisionLocked,
@@ -851,6 +978,8 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   htmlEmbeds,
   renderSvgFences = false,
   textComments = false,
+  textDeletions = false,
+  questionTextComments = false,
   suggestComment,
   vimModeEnabled = false,
   vimHudEnabled = false,
@@ -891,6 +1020,9 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     }
     setLightboxState(imageLightboxStepping || imageRegionComments ? { ...image, images: documentImages() } : image);
   };
+  const setLightboxRef = useRef(setLightbox);
+  setLightboxRef.current = setLightbox;
+  const onBlockImageClick = useCallback((src: string, alt: string) => setLightboxRef.current({ src, alt }), []);
   // Region comments made in the lightbox are selected by the host as they are
   // added; that selection must not reopen or refocus the lightbox.
   const regionCreatedHere = useRef(new Set<string>());
@@ -911,6 +1043,17 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     }
   };
   const containerRef = useRef<HTMLDivElement>(null);
+  // "Open in" opens the document's file at the picked comment's line, else the
+  // selected text's, read at the click (documentOpenInLine). A plan diff view's
+  // blocks are not the file's lines, so it sends none.
+  const openInLineRef = useRef({ blocks, annotations, selectedAnnotationId, isPlanDiffActive });
+  openInLineRef.current = { blocks, annotations, selectedAnnotationId, isPlanDiffActive };
+  const openInAppLine = useCallback((): number | undefined => {
+    const now = openInLineRef.current;
+    if (now.isPlanDiffActive) return undefined;
+    const selection = typeof window === 'undefined' ? null : window.getSelection();
+    return documentOpenInLine(containerRef.current, now.blocks, now.annotations, now.selectedAnnotationId, selection);
+  }, []);
   // The element that actually scrolls; shared by the Vim scroll math, the
   // sticky-header observer, and the reticle geometry.
   const scrollViewport = useScrollViewport();
@@ -918,27 +1061,41 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   // card's top padding. One row fits; a second row (diff badge) or mobile
   // wrapping outgrows the padding and lands on the document's first heading.
   // Measure the cluster and insert exactly the clearance it needs (0 when it fits).
+  // The cluster also stops where the action cluster starts on the same row, so
+  // a long file name truncates at the buttons instead of running under them;
+  // with no buttons on its row (the phone layout) it stops inside the card.
   const docBadgesRef = useRef<HTMLDivElement | null>(null);
   const [badgeClearance, setBadgeClearance] = useState(0);
+  const [badgeMaxWidth, setBadgeMaxWidth] = useState<number | null>(null);
   useEffect(() => {
     if (hasViewerAnnotationHeader) {
       setBadgeClearance(0);
+      setBadgeMaxWidth(null);
       return;
     }
     const el = docBadgesRef.current;
     const article = containerRef.current;
-    if (!el || !article) { setBadgeClearance(0); return; }
+    if (!el || !article) { setBadgeClearance(0); setBadgeMaxWidth(null); return; }
+    // The static float that holds the actions' place: the sticky lane's spacer
+    // (the lane itself moves while stuck), or the plain float without one.
+    const actions = article.querySelector<HTMLElement>('[data-sticky-actions-spacer]')
+      ?? article.querySelector<HTMLElement>('[data-sticky-actions]');
     const measure = () => {
       const pad = parseFloat(getComputedStyle(article).paddingTop) || 0;
       const overflow = el.offsetTop + el.offsetHeight - pad;
       setBadgeClearance(overflow > 1 ? overflow + 4 : 0);
+      setBadgeMaxWidth(legacyBadgesMaxWidth(el.getBoundingClientRect(), actions?.getBoundingClientRect() ?? null, article.getBoundingClientRect()));
     };
     measure();
     const ro = new ResizeObserver(measure);
     ro.observe(el);
+    // The card too: when it narrows (the sidebar opens, the layout settles after
+    // first paint) the actions float moves without changing size.
+    ro.observe(article);
+    if (actions) ro.observe(actions);
     window.addEventListener('resize', measure);
     return () => { ro.disconnect(); window.removeEventListener('resize', measure); };
-  }, [hasViewerAnnotationHeader, repoInfo, hasPreviousVersion, showDemoBadge, linkedDocInfo, archiveInfo, sourceInfo, planDiffStats, openInAppPath]);
+  }, [hasViewerAnnotationHeader, stickyActions, repoInfo, hasPreviousVersion, showDemoBadge, linkedDocInfo, archiveInfo, sourceInfo, planDiffStats, openInAppPath]);
 
   // Per-doc heading slug map with dedup — computed once per blocks array so
   // anchor ids stay stable across re-renders and duplicate heading texts get
@@ -948,9 +1105,14 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   // annotations that carry `questionAnswer` (matched by question key, so an
   // answer follows its question across re-parses).
   const questionIndex = useMemo(() => {
-    const list = indexQuestionBlocks(blocks, { decisionLines: questionDecisionLines, contractLines: questionContractLines });
+    const list = indexQuestionBlocks(blocks, {
+      decisionLines: questionDecisionLines,
+      contractLines: questionContractLines,
+      ...(questionOptionLines ? { optionLines: true } : {}),
+      ...(questionChangeLines ? { changeLines: true } : {}),
+    });
     return { byBlock: new Map(list.map((q) => [q.blockId, q])), total: list.length };
-  }, [blocks, questionDecisionLines, questionContractLines]);
+  }, [blocks, questionDecisionLines, questionContractLines, questionOptionLines, questionChangeLines]);
   // A host that keeps answers itself (`questionAnswers`) replaces the
   // annotation-derived map; each entry is validated like any other reader.
   const answersByKey = useMemo(
@@ -974,6 +1136,15 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     isGlobal: boolean;
     codeBlock?: { block: Block; element: HTMLElement };
   } | null>(null);
+  const viewerCommentPopoverRef = useRef(viewerCommentPopover);
+  viewerCommentPopoverRef.current = viewerCommentPopover;
+  /** The part each diagram's composer is on while it is open (DiagramBlock's onComposerAnchor), for `peekComment`. */
+  const diagramComposers = useRef(new Map<string, { blockId: string; anchor: DiagramAnchor }>());
+  const onDiagramComposer = useCallback((blockId: string, where: 'inline' | 'popout', anchor: DiagramAnchor | null) => {
+    const key = `${blockId}:${where}`;
+    if (anchor) diagramComposers.current.set(key, { blockId, anchor });
+    else diagramComposers.current.delete(key);
+  }, []);
   // Viewer-specific quick label state (code blocks)
   const [codeBlockQuickLabelPicker, setCodeBlockQuickLabelPicker] = useState<{
     anchorEl: HTMLElement;
@@ -995,6 +1166,20 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     );
   }, []);
 
+  // Visible comment drafts (opt-in, `configurePlannotatorUI({ visibleCommentDrafts })`): a selection's comment closed
+  // with words keeps its highlight and a "Draft" badge (CommentDraftBadges). The draft's key is the popover's below;
+  // the shelf (utils/commentDraftShelf) keeps what each is on, per document, so they come back on the next mount.
+  const [visibleDrafts] = useState(getVisibleCommentDrafts);
+  const draftScopeRef = useRef('');
+  const commentDraftShelf = useMemo<CommentDraftShelf>(() => {
+    const waits = (draftKey: string) => hasCommentDraft(`plan:${draftScopeRef.current}:${draftKey}`);
+    return {
+      keeps: (popover) => waits(popover.draftKey),
+      put: (draft) => shelveCommentDraft(draftScopeRef.current, draft),
+      list: () => shelvedCommentDrafts(draftScopeRef.current, waits),
+    };
+  }, []);
+
   // Shared annotation infrastructure via hook
   const {
     toolbarState,
@@ -1014,6 +1199,11 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     clearAllHighlights,
     applyAnnotations,
     takeSelection,
+    highlighterRef,
+    commentDrafts,
+    reopenCommentDraft,
+    reopenComment: hookReopenComment,
+    peekComment: peekSelectionComment,
   } = useAnnotationHighlighter({
     containerRef,
     annotations,
@@ -1034,6 +1224,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     onRestoreMismatch: handleRestoreMismatch,
     onRestoreReport,
     onHostDraft: hostComposes ? onHostDraft : undefined,
+    commentDraftShelf: visibleDrafts && !hostComposes ? commentDraftShelf : undefined,
   });
 
   // Refs for code block annotation path
@@ -1246,6 +1437,19 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     onCodeBlockClick: hostComposes ? noHostCodeBlockClick : handlePinpointCodeBlockClick,
   });
   clearPinpointHoverRef.current = clearPinpointHover;
+  // Click a word, part of Select: one click on a word highlights it; a drag is the browser's own
+  // selection, as always. Off with the `clickAWord` prop, else `configurePlannotatorUI({ clickAWord })`.
+  // Redline makes nothing of a click: a stray click must not delete a word. Pinpoint owns its
+  // clicks; off under read-only, a plan diff and vim focus.
+  const [clickAWordDefault] = useState(getClickAWord);
+  useClickWord({
+    containerRef,
+    enabled: (clickAWordProp ?? clickAWordDefault) && inputMethod !== 'pinpoint' && selectionCommentsOn && !(isPlanDiffActive ?? false) && !(vimModeActive && vim.focused),
+    clicksEnabled: mode !== 'redline',
+    snapDrags: false,
+    annotationUiOpen: !!(toolbarState || hookCommentPopover || viewerCommentPopover || hookQuickLabelPicker || codeBlockQuickLabelPicker),
+    onSelectRange: hostComposes ? hostPinpointRange : highlightRange,
+  });
   const vimOwnsHudTarget = vimHudEnabled
     && vim.state.phase !== 'inactive'
     && (vim.focused || vim.state.phase === 'action');
@@ -1332,8 +1536,8 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     const container = containerRef.current;
     if (!container || !scrollViewport) return false;
 
-    const target = document.getElementById(anchor);
-    if (!target || !container.contains(target)) return false;
+    const target = container.querySelector<HTMLElement>(`#${CSS.escape(anchor)}`);
+    if (!target) return false;
 
     const documentHeader = stickyActions
       ? container.querySelector<HTMLElement>('[data-viewer-document-header]')
@@ -1370,24 +1574,81 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     return () => window.clearTimeout(timer);
   }, [blocks, locationHash, scrollToAnchor, scrollViewport]);
 
-  // Use the native copy event so clipboard writes are synchronous (Safari
-  // rejects the async navigator.clipboard API outside the user-gesture window).
-  // web-highlighter clears the DOM selection on mouseup, so the browser has
-  // nothing to copy by the time Cmd+C fires — we inject the captured text here.
-  useEffect(() => {
-    const handleCopy = (e: ClipboardEvent) => {
-      const tag = (e.target as HTMLElement)?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+  // Ctrl+C / Cmd+C with the toolbar up or the selection's composer open is
+  // `useAnnotationHighlighter`'s (`utils/highlightCopy`): the native copy
+  // event, so the clipboard write stays synchronous inside the key press.
 
-      if (toolbarState?.selectionText) {
-        e.preventDefault();
-        e.clipboardData?.setData('text/plain', toolbarState.selectionText);
-      }
+  // `ViewerHandle.reopenComment`: a comment being written that the host kept
+  // when its file closed, back in its composer. A global comment opens the
+  // global composer (anchored on its button), a fenced code block's opens on
+  // that block, a diagram part's in its diagram (once drawn), a text
+  // selection's through the highlighter. Kinds with no composer here say no.
+  const [diagramReopen, setDiagramReopen] = useState<{ blockId: string; request: DiagramReopenRequest } | null>(null);
+  const reopenComment = useCallback((annotation: Annotation, onMissing?: () => void): boolean => {
+    const words = annotation.text ?? '';
+    if (annotation.imageRegion != null || annotation.questionAnswer || annotation.mathTargets?.length) return false;
+    if (annotation.type !== AnnotationType.COMMENT && annotation.type !== AnnotationType.GLOBAL_COMMENT) return false;
+    let missed = false;
+    const missing = () => {
+      if (missed) return;
+      missed = true;
+      onMissing?.();
     };
+    if (annotation.type === AnnotationType.GLOBAL_COMMENT) {
+      if (readOnlyRef.current) return false;
+      const anchorEl = globalCommentButtonRef.current;
+      if (!anchorEl) return false;
+      setViewerCommentPopover({ anchorEl, contextText: '', isGlobal: true, initialText: words });
+      return true;
+    }
+    if (annotation.diagramAnchor != null) {
+      if (!selectionCommentsOn) return false;
+      const block = blocks.find((candidate) => candidate.id === annotation.blockId);
+      if (!block || block.type !== 'code') {
+        missing();
+        return true;
+      }
+      setDiagramReopen({ blockId: block.id, request: { anchor: annotation.diagramAnchor, text: words, onMissing: missing } });
+      return true;
+    }
+    if (!annotation.startMeta && annotation.blockId && annotation.id.startsWith('codeblock-')) {
+      if (readOnlyRef.current) return false;
+      const block = blocks.find((candidate) => candidate.id === annotation.blockId);
+      const element = containerRef.current?.querySelector<HTMLElement>(`[data-block-id="${CSS.escape(annotation.blockId)}"]`);
+      const codeText = element?.querySelector('code')?.textContent ?? null;
+      if (!block || !element || codeText === null || codeText !== annotation.originalText) {
+        missing();
+        return true;
+      }
+      setViewerCommentPopover({
+        anchorEl: element,
+        contextText: codeText.slice(0, 80),
+        selectedText: codeText,
+        initialText: words,
+        isGlobal: false,
+        codeBlock: { block, element },
+      });
+      return true;
+    }
+    if (!annotation.originalText) return false;
+    return hookReopenComment(annotation, missing);
+  }, [blocks, hookReopenComment, selectionCommentsOn]);
 
-    document.addEventListener('copy', handleCopy);
-    return () => document.removeEventListener('copy', handleCopy);
-  }, [toolbarState]);
+  // `ViewerHandle.peekComment`: the comment being written, as its submit would add it, with empty words. Reads only.
+  const peekComment = useCallback((): Annotation | null => {
+    const selection = peekSelectionComment();
+    if (selection) return selection;
+    const base = { startOffset: 0, endOffset: 0, text: '', createdA: Date.now(), author: getIdentity() };
+    const open = viewerCommentPopoverRef.current;
+    if (open?.isGlobal) return { ...base, id: 'global-kept', blockId: '', type: AnnotationType.GLOBAL_COMMENT, originalText: '' };
+    if (open?.codeBlock) {
+      const codeText = open.codeBlock.element.querySelector('code')?.textContent ?? '';
+      return { ...base, id: 'codeblock-kept', blockId: open.codeBlock.block.id, endOffset: codeText.length, type: AnnotationType.COMMENT, originalText: codeText };
+    }
+    const part = [...diagramComposers.current.values()].at(-1);
+    if (part) return { ...base, id: 'diagram-kept', blockId: part.blockId, type: AnnotationType.COMMENT, originalText: diagramTargetText(part.anchor), diagramAnchor: part.anchor };
+    return null;
+  }, [peekSelectionComment]);
 
   // Imperative handle — delegates to hook, extends removeHighlight for code blocks
   useImperativeHandle(ref, () => ({
@@ -1419,7 +1680,9 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     clearAllHighlights,
     applySharedAnnotations: applyAnnotations,
     takeSelection,
-  }), [hookRemoveHighlight, clearAllHighlights, applyAnnotations, blocks, takeSelection, scrollToAnchor]);
+    reopenComment,
+    peekComment,
+  }), [hookRemoveHighlight, clearAllHighlights, applyAnnotations, blocks, takeSelection, scrollToAnchor, reopenComment, peekComment]);
 
   // --- Viewer-specific: code block annotation ---
 
@@ -1511,6 +1774,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   }, []);
 
   const commentDraftScope = linkedDocInfo?.filepath ?? sourceInfo ?? markdown.slice(0, 120);
+  draftScopeRef.current = commentDraftScope;
 
   const codePathValidation = useValidatedCodePaths(markdown, codePathBaseDir, disableCodePathValidation);
 
@@ -1704,16 +1968,18 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     <CodePathValidationContext.Provider value={codePathValidation}>
     <LocalLinkContext.Provider value={resolveLocalLink ?? null}>
     <DiagramAnchorClaimsContext.Provider value={diagramClaims}>
+    <CommentDraftScopeContext.Provider value={commentDraftScope}>
     <div
       className={`relative z-50 w-full${fillHeight ? ' flex flex-col print:block' : ''}`}
       data-viewer-fill-height={fillHeight ? '' : undefined}
       style={maxWidth === null ? undefined : { maxWidth: maxWidth ?? 832 }}
     >
-      {taterMode && <TaterSpriteSitting />}
+      {taterMode && <TaterSittingSlot />}
       <article
         ref={containerRef}
         data-print-region="article"
         data-doc-text-root=""
+        data-doc-source-root={gridEnabled ? 'grid' : 'clean'}
         data-vim-mode={vimModeActive ? 'enabled' : undefined}
         data-vim-phase={vimModeActive ? vim.state.phase : undefined}
         data-vim-focused={vimModeActive ? String(vim.focused) : undefined}
@@ -1729,9 +1995,13 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
           ...(vimModeActive ? { outline: 'none' } : {}),
         } as React.CSSProperties}
       >
-        {/* Legacy badge placement remains byte-for-byte opt-out behavior. */}
         {!viewerAnnotationHeader && (repoInfo || hasPreviousVersion || showDemoBadge || linkedDocInfo || archiveInfo || sourceInfo || openInAppPath) && (
-          <div ref={docBadgesRef} data-print-hide className={`absolute top-3 md:top-4 ${gridEnabled ? 'left-3 md:left-5' : 'left-0'}`}>
+          <div
+            ref={docBadgesRef}
+            data-print-hide
+            className={`absolute top-3 md:top-4 ${gridEnabled ? 'left-3 md:left-5' : 'left-0'}`}
+            style={badgeMaxWidth !== null ? { maxWidth: badgeMaxWidth } : undefined}
+          >
             <DocBadges
               layout="column"
               repoInfo={repoInfo}
@@ -1746,6 +2016,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
               linkedDocInfo={linkedDocInfo}
               sourceInfo={sourceInfo}
               openInAppPath={openInAppPath}
+              openInAppLine={openInAppLine}
             />
           </div>
         )}
@@ -1772,6 +2043,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
               linkedDocInfo,
               sourceInfo,
               openInAppPath,
+              openInAppLine,
             }}
             actions={documentActions}
           />
@@ -1790,7 +2062,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
             )}
           </>
         )}
-        {frontmatter && <><div className="clear-right md:hidden" /><FrontmatterCard frontmatter={frontmatter} /></>}
+        {frontmatter && <><div className="clear-right md:hidden" /><FrontmatterCard frontmatter={frontmatter} markdown={markdown} /></>}
         {!frontmatter && blocks.length > 0 && blocks[0].type !== 'heading' && <div className="mt-4" />}
         {withBelowTitle(groupBlocks(blocks).map(group =>
           group.type === 'list-group' ? (
@@ -1801,7 +2073,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
                   {group.blocks.map((block, i) => (
                     <BlockRenderer
                       imageBaseDir={imageBaseDir}
-                      onImageClick={(src, alt) => setLightbox({ src, alt })}
+                      onImageClick={onBlockImageClick}
                       key={block.id}
                       block={block}
                       orderedIndex={indices[i]}
@@ -1836,12 +2108,14 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
                 <MermaidBlock
                   block={group.block}
                   annotations={annotations}
+                  reopenComment={diagramReopen?.blockId === group.block.id ? diagramReopen.request : undefined}
+                  onComposerAnchor={onDiagramComposer}
                   selectedAnnotationId={selectedAnnotationId}
                   onSelectAnnotation={onSelectAnnotation}
-                  onAddAnnotation={authoringOff ? undefined : onAddAnnotation}
-                  readOnly={authoringOff}
+                  onAddAnnotation={selectionCommentsOn ? onAddAnnotation : undefined}
+                  readOnly={!selectionCommentsOn}
                   onRestoreReport={onRestoreReport}
-                  onAskAI={authoringOff ? undefined : onAskAI}
+                  onAskAI={selectionCommentsOn ? onAskAI : undefined}
                   askAISourcePath={linkedDocInfo?.filepath ?? sourceInfo}
                 />
               </Suspense>
@@ -1852,12 +2126,14 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
                 <GraphvizBlock
                   block={group.block}
                   annotations={annotations}
+                  reopenComment={diagramReopen?.blockId === group.block.id ? diagramReopen.request : undefined}
+                  onComposerAnchor={onDiagramComposer}
                   selectedAnnotationId={selectedAnnotationId}
                   onSelectAnnotation={onSelectAnnotation}
-                  onAddAnnotation={authoringOff ? undefined : onAddAnnotation}
-                  readOnly={authoringOff}
+                  onAddAnnotation={selectionCommentsOn ? onAddAnnotation : undefined}
+                  readOnly={!selectionCommentsOn}
                   onRestoreReport={onRestoreReport}
-                  onAskAI={authoringOff ? undefined : onAskAI}
+                  onAskAI={selectionCommentsOn ? onAskAI : undefined}
                   askAISourcePath={linkedDocInfo?.filepath ?? sourceInfo}
                 />
               </Suspense>
@@ -1867,7 +2143,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
               key={group.block.id}
               block={group.block}
               imageBaseDir={imageBaseDir}
-              onImageClick={(src, alt) => setLightbox({ src, alt })}
+              onImageClick={onBlockImageClick}
               onOpenLinkedDoc={onOpenLinkedDoc}
               onOpenCodeFile={onOpenCodeFile}
               githubRepo={linkRepo?.display}
@@ -1947,7 +2223,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
                   : undefined;
               if (hostCard !== undefined) {
                 return (
-                  <div key={group.block.id} data-block-id={group.block.id} data-block-type="directive" className={textCommentsOnly ? 'annotation-exclude' : undefined}>
+                  <div key={group.block.id} data-block-id={group.block.id} data-block-type="directive" className={textCommentsOnly ? 'relative annotation-exclude' : 'relative'} {...sourceLineAttrs(group.block)}>
                     {hostCard}
                   </div>
                 );
@@ -1955,7 +2231,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
               const rendered = (
                 <BlockRenderer
                   imageBaseDir={imageBaseDir}
-                  onImageClick={(src, alt) => setLightbox({ src, alt })}
+                  onImageClick={onBlockImageClick}
                   key={group.block.id}
                   block={group.block}
                   onOpenLinkedDoc={onOpenLinkedDoc}
@@ -1972,7 +2248,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
                   onAnswerQuestion={readOnly || (question && questionReadOnly?.(question)) ? undefined : onAnswerQuestion}
                   onSaveQuestionAnswer={readOnly || (question && questionReadOnly?.(question)) ? undefined : onSaveQuestionAnswer}
                   saveQuestionAnswerLabel={saveQuestionAnswerLabel}
-                  renderQuestionFooter={renderQuestionFooter}
+                  renderQuestionFooter={asksQuestion(group.block) ? renderQuestionFooter : undefined}
                   questionDecisionRecording={question ? questionDecisionRecording?.(question) : undefined}
                   questionDecisionScope={questionDecisionScope}
                   onToggleQuestionDecisionRecording={readOnly || (question && (questionDecisionLocked?.(question) || questionReadOnly?.(question))) ? undefined : onToggleQuestionDecisionRecording}
@@ -1980,15 +2256,20 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
                   questionStatusTag={questionStatusTag}
                   questionStatusLabel={questionStatusLabel}
                   renderQuestionBelowPrompt={renderQuestionBelowPrompt}
+                  renderQuestionAfterChoices={renderQuestionAfterChoices}
                   questionContractLines={questionContractLines}
                   questionPictureChoices={questionPictureChoices}
                   questionPictureBadge={questionPictureBadge}
+                  onQuestionPictureZoom={onQuestionPictureZoom}
+                  questionPictureSize={questionPictureSize}
+                  questionAcceptBehavior={questionAcceptBehavior}
                 />
               );
               // `textComments`: a question card's words are not commented on
-              // (its own controls already are excluded); a box-less wrapper
-              // keeps its layout.
-              if (question && textCommentsOnly) {
+              // (its own controls already are excluded) unless the host asks
+              // for them (`questionTextComments`); a box-less wrapper keeps
+              // its layout.
+              if (question && textCommentsOnly && !questionTextComments) {
                 return (
                   <div key={group.block.id} className="annotation-exclude" style={{ display: 'contents' }}>
                     {rendered}
@@ -2007,15 +2288,20 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
               element={toolbarState.element}
               positionMode="center-above"
               commentOnly={textCommentsOnly || undefined}
+              showDelete={textCommentsOnly && textDeletions ? true : undefined}
               onAnnotate={handleAnnotate}
               onClose={handleToolbarClose}
               onRequestComment={handleRequestComment}
               onQuickLabel={handleQuickLabel}
               selectionActions={selectionActions}
               selectionActionsIcon={selectionActionsIcon}
+              onSide={onSide}
+              sideButton={sideButton}
               quickLabels={quickLabels}
               copyText={toolbarState.selectionText}
               getRichCopy={getRichCopyEnabled() ? toolbarState.getRichCopy : undefined}
+              touchAnchorRect={toolbarState.getAnchorRect}
+              touchSide={toolbarState.touchSide}
               hideCopyButton={!isTouchDevice}
               closeOnScrollOut
             />
@@ -2104,7 +2390,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
             onClose={() => setPopoutTable(null)}
             container={containerRef.current}
             imageBaseDir={imageBaseDir}
-            onImageClick={(src, alt) => setLightbox({ src, alt })}
+            onImageClick={onBlockImageClick}
             onOpenLinkedDoc={onOpenLinkedDoc}
             onOpenCodeFile={onOpenCodeFile}
             githubRepo={linkRepo?.display}
@@ -2160,7 +2446,12 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
                 label: 'Selected text',
                 text: hookCommentPopover.selectedText ?? hookCommentPopover.contextText,
                 sourcePath: linkedDocInfo?.filepath ?? sourceInfo,
-                ...selectionSourceLines(blocks, hookCommentPopover.blockIds ?? []),
+                ...selectionSourceLines(
+                  blocks,
+                  hookCommentPopover.blockIds ?? [],
+                  hookCommentPopover.selectedText,
+                  hookCommentPopover.startOffset,
+                ),
               }}
             />
           )}
@@ -2222,6 +2513,10 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
             }}
           />
         )}
+        {/* Mounted while drafts are on, so a badge that opened its comment gets focus back as it closes. */}
+        {visibleDrafts && (
+          <CommentDraftBadges drafts={commentDrafts} highlighterRef={highlighterRef} containerRef={containerRef} onOpen={reopenCommentDraft} />
+        )}
       </article>
 
       {/* Image lightbox */}
@@ -2236,6 +2531,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
         document.body
       )}
     </div>
+    </CommentDraftScopeContext.Provider>
     </DiagramAnchorClaimsContext.Provider>
     </LocalLinkContext.Provider>
     </CodePathValidationContext.Provider>

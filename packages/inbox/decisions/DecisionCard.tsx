@@ -15,6 +15,7 @@
  * thread card's own tiles (ui's `QuestionPictureTiles`): the picture picks and
  * the zoom button opens the viewer, never both.
  */
+import { inboxUrl, machineOf } from '../inboxUrl';
 import { useEffect, useId, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import { InlineMarkdown } from '@plannotator/ui/components/InlineMarkdown';
 import { QuestionPictureTiles } from '@plannotator/ui/components/blocks/QuestionBlock';
@@ -27,6 +28,7 @@ import { inboxMessageImageUrl } from '../images';
 import { Tip } from '../components/Tip';
 import { ContextMarkdown } from '../components/ContextMarkdown';
 import { useRefRepo } from '../links';
+import { choiceName } from '../optionSets';
 import { answerNeedsConfirm, answerWords, choiceAnswer, confirmLabel, otherAnswer, skipAnswer, swipeChoices, swipeHint, textAnswer } from './model';
 
 /**
@@ -73,6 +75,8 @@ export interface CardPicture {
   /** The src the context wrote it as, when it came from there (left out of the context, shown as the hero). */
   ref: string | null;
   src: string;
+  /** The picture's own alt text, where its name is something else (a picture choice is named by its choice). */
+  alt?: string;
 }
 
 /**
@@ -89,11 +93,11 @@ export function cardPictures(decision: InboxDecision): CardPicture[] {
       attachmentId: image.attachment_id,
       name: image.name,
       ref: image.ref,
-      src: `/api/inbox/attachments/${encodeURIComponent(image.attachment_id)}/image`,
+      src: inboxUrl(`/attachments/${encodeURIComponent(image.attachment_id)}/image`, undefined, machineOf(image.attachment_id)),
     }));
   for (const file of decision.pictures.attachments) {
     if (file.kind !== 'image') continue;
-    out.push({ attachmentId: file.attachment_id, name: file.name, ref: null, src: `/api/inbox/attachments/${encodeURIComponent(file.attachment_id)}/image` });
+    out.push({ attachmentId: file.attachment_id, name: file.name, ref: null, src: inboxUrl(`/attachments/${encodeURIComponent(file.attachment_id)}/image`, undefined, machineOf(file.attachment_id)) });
   }
   if (q.shows?.kind === 'image') {
     const src = q.shows.src;
@@ -107,7 +111,7 @@ export function cardPictures(decision: InboxDecision): CardPicture[] {
 /** Where a picture choice's picture loads from: its captured file, else the message's image route. */
 export function choicePictureUrl(decision: InboxDecision, src: string): string {
   const image = decision.pictures.inline.find((candidate) => candidate.ref === src);
-  return image ? `/api/inbox/attachments/${encodeURIComponent(image.attachment_id)}/image` : inboxMessageImageUrl(decision.message.id, src);
+  return image ? inboxUrl(`/attachments/${encodeURIComponent(image.attachment_id)}/image`, undefined, machineOf(image.attachment_id)) : inboxMessageImageUrl(decision.message.id, src);
 }
 
 /**
@@ -337,7 +341,7 @@ export function DecisionCard(props: DecisionCardProps) {
   const recommendedLabels = q.choices.filter((c) => c.recommended).map((c) => c.label);
   /** The tile pictures, for the viewer's stepping (a zoom opens on its own tile). */
   const tilePictures: CardPicture[] = q.choices.flatMap((choice, index) =>
-    choice.image && tileUrls[index] ? [{ attachmentId: '', name: choice.image.alt || choice.label, ref: choice.image.src, src: tileUrls[index]! }] : [],
+    choice.image && tileUrls[index] ? [{ attachmentId: '', name: choiceName(choice.label, index, q.choices.map((c) => c.label)), alt: choice.image.alt || choice.label, ref: choice.image.src, src: tileUrls[index]! }] : [],
   );
 
   const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -533,7 +537,8 @@ export function DecisionCard(props: DecisionCardProps) {
                     : checked && setSelected([label])
                 }
                 // The picture picks (it is in the tile's label); the zoom button opens the viewer and never picks.
-                onZoom={(url) => props.onImage(tilePictures, Math.max(0, tilePictures.findIndex((p) => p.src === url)))}
+                // By the choice's place, not its picture's URL: a picture two choices share opens as the one zoomed.
+                onZoom={(_url, _alt, index) => props.onImage(tilePictures, q.choices.slice(0, index).filter((c, i) => c.image && tileUrls[i]).length)}
                 onPictureError={(url) => setFailedPictures((prev) => (prev.has(url) ? prev : new Set([...prev, url])))}
                 renderText={(text) => <InlineMarkdown {...refProps} text={text} />}
                 inputProps={(label) => ({

@@ -42,6 +42,7 @@ export type WideModeType = 'wide' | 'focus';
 export interface ImageAttachment {
   path: string;
   name: string;
+  kind?: 'file';
 }
 
 /** DOM-relative text position used to restore a document annotation selection. */
@@ -213,6 +214,7 @@ export interface Block {
   directiveKind?: string; // For directive containers (e.g. ':::note' → 'note')
   order: number; // Sorting order
   startLine: number; // 1-based line number in source
+  blankLinesBefore?: number; // Paragraph only, with parse option keepBlankLines: the blank lines (2+) typed before it
   sourceLineCount?: number; // Number of source lines consumed when it differs from content lines
   /**
    * Line offset a diagram comment's `sourceLine` is measured from, when it
@@ -224,6 +226,14 @@ export interface Block {
    * `(lines a–b)` label.
    */
   diagramSourceLineOffset?: number;
+  /**
+   * Set on a whole-file code document (`renderAs: "code"`, see
+   * `codeDocumentBlocks`): the document line of `content`'s first character.
+   * The file is ONE block, so a comment's line label is counted from its
+   * position inside `content`, not the block's span (which would name every
+   * line). Unset everywhere else, so other labels stay as they were.
+   */
+  contentStartLine?: number;
 }
 
 export interface DiffResult {
@@ -463,7 +473,9 @@ export interface DiffAnnotationMetadata {
    *  the projected metadata, not the full annotation. */
   copyText?: string;
   // AI marker fields (set when kind === 'ai-marker')
-  kind?: 'annotation' | 'ai-marker';
+  kind?: 'annotation' | 'ai-marker' | 'host-note' | 'context-note';
+  /** A host's context note (kind === 'context-note'; review-editor's `contextNotes`): never a comment. */
+  contextNoteId?: string;
   questionId?: string;
   promptPreview?: string;
   hasResponse?: boolean;

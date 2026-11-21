@@ -11,6 +11,7 @@
 // or reorder any of these lines.
 import '@plannotator/ui/utils/math-eager';
 import '@plannotator/ui/utils/identity-tater';
+import '@plannotator/ui/utils/tater-sprites-eager';
 import React, { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback } from 'react';
 import { shouldPrintOnKey } from './printShortcut';
 import { toast, Toaster } from 'sonner';
@@ -33,6 +34,7 @@ import {
   type AnnotateBundleFile,
 } from '@plannotator/shared/annotate-bundle';
 import { setExtraMarkdownExtensions } from '@plannotator/ui/utils/markdownExtensions';
+import { repoLabel } from '@plannotator/ui/utils/repoLabel';
 import { installPlainTextPaste } from '@plannotator/ui/utils/pasteInsert';
 import { documentRendersHtml, htmlAssetRouteFromDocument, resolveHtmlLinkIntent } from '@plannotator/ui/utils/htmlLinkNavigation';
 import { ImageLightbox } from '@plannotator/ui/components/ImageLightbox';
@@ -66,11 +68,13 @@ import { shareableDocumentMarkdown } from '@plannotator/ui/utils/sharing';
 import { getCallbackConfig, CallbackAction, executeCallback } from '@plannotator/ui/utils/callback';
 import { useAgents } from '@plannotator/ui/hooks/useAgents';
 import { useActiveSection } from '@plannotator/ui/hooks/useActiveSection';
+import { tocHeadings } from '@plannotator/ui/utils/annotationHelpers';
 import { storage } from '@plannotator/ui/utils/storage';
 import { getIdentity } from '@plannotator/ui/utils/identity';
 import { copyTextToClipboard } from '@plannotator/ui/utils/clipboard';
 import { configStore, useConfigValue } from '@plannotator/ui/config';
 import { CompletionOverlay } from '@plannotator/ui/components/CompletionOverlay';
+import { useStarAskDoneScreen } from '@plannotator/ui/components/StarAskDoneScreen';
 import { useUpdateCheck } from '@plannotator/ui/hooks/useUpdateCheck';
 import { useUpdateToast } from '@plannotator/ui/hooks/useUpdateToast';
 import { useUpdateCheckSetting } from '@plannotator/ui/hooks/useUpdateCheckSetting';
@@ -97,6 +101,7 @@ import type { SessionAskAction } from '@plannotator/ui/components/ai/SessionAskN
 import { useAIProviderConfig } from '@plannotator/ui/hooks/useAIProviderConfig';
 import { useDocumentTextSize } from '@plannotator/ui/hooks/useDocumentTextSize';
 import { useDocumentFont } from '@plannotator/ui/hooks/useDocumentFont';
+import { useDocumentSourceLineNumbers } from '@plannotator/ui/hooks/useDocumentSourceLineNumbers';
 import { useAIProviderActivation } from '@plannotator/ui/hooks/useAIProviderActivation';
 import { usePlanLookDialog } from '@plannotator/ui/hooks/usePlanLookDialog';
 import { TerminalToolsAnnouncementDialog } from '@plannotator/ui/components/TerminalToolsAnnouncementDialog';
@@ -200,9 +205,10 @@ import {
   type GoalSetupSurfaceHandle,
 } from '@plannotator/ui/components/goal-setup/GoalSetupSurface';
 import type { GoalSetupBundle } from '@plannotator/shared/goal-setup';
-import type { AIContext } from '@plannotator/ai';
+import type { AIContext } from '@plannotator/core/ai-context';
 import type { CommentAskAIContext } from '@plannotator/ui/components/CommentPopover';
 import {
+  basenameFromPath,
   hasSourceSaveConflictSnapshot,
   isSourceSaveFilePath,
   type SourceSaveCapability,
@@ -216,7 +222,7 @@ import { observeActionsLabelMode } from './actionsLabelMode';
 // same env var on the server side so V2/V3 stay paired.
 import { DEMO_PLAN_CONTENT as DEFAULT_DEMO_PLAN_CONTENT } from './demoPlan';
 import { DIFF_DEMO_PLAN_CONTENT } from './demoPlanDiffDemo';
-import { canUseAnnotateWideMode, resolveFocusShortcutAction, resolveWideModeExitLayout, type WideModeLayoutSnapshot, type WideModeType } from '@plannotator/ui/utils/wideMode';
+import { canUseAnnotateWideMode, parseAnnotateOpenView, resolveAnnotateOpenView, resolveFocusShortcutAction, resolveWideModeExitLayout, type AnnotateOpenView, type WideModeLayoutSnapshot, type WideModeType } from '@plannotator/ui/utils/wideMode';
 import { modKey } from '@plannotator/ui/utils/platform';
 import {
   annotateSidebarShortcuts,
@@ -329,7 +335,7 @@ import {
   computeEditStats,
   isEmptyFeedbackSentinel,
   normalizeEditedMarkdown,
-} from './directEdits';
+} from '@plannotator/shared/direct-edits';
 import {
   buildAnnotateApprovalBody,
   buildCompleteAnnotateFeedback,
@@ -373,8 +379,10 @@ import { scrollableEditSurface } from './editScroll';
 import { configurePlannotatorUI } from '@plannotator/ui/configure';
 
 // Plannotator's own plan review and annotate: the selection toolbar's Copy
-// copies rich text; @plannotator/ui hosts keep plain Copy unless they opt in.
-configurePlannotatorUI({ richCopy: true });
+// copies rich text, and on a touch screen the toolbar sits below the selection
+// (clear of iOS's edit menu), inside the screen, with thumb-sized buttons;
+// @plannotator/ui hosts keep both unchanged unless they opt in.
+configurePlannotatorUI({ richCopy: true, touchSelectionToolbar: true });
 
 type NoteAutoSaveResults = {
   obsidian?: boolean;
@@ -568,8 +576,14 @@ const App: React.FC = () => {
     [displayedMarkdown, parseFrontmatter],
   );
   const blocks = useMemo(
-    () => blocksForRenderAs(displayedMarkdown, renderAs, parseFrontmatter),
-    [renderAs, displayedMarkdown, parseFrontmatter],
+    () => blocksForRenderAs(displayedMarkdown, renderAs, parseFrontmatter, activeParseDocPath),
+    [renderAs, displayedMarkdown, parseFrontmatter, activeParseDocPath],
+  );
+  // A config file's version diff shows its chunks as code, in the language
+  // (and under the same size limit) its document block already resolved.
+  const planDiffCodeDocument = useMemo(
+    () => (renderAs === 'code' ? { language: blocks[0]?.language } : undefined),
+    [renderAs, blocks],
   );
   const [showExport, setShowExport] = useState(false);
   const [showImport, setShowImport] = useState(false);
@@ -577,7 +591,6 @@ const App: React.FC = () => {
   const [showSourceFileEditWarning, setShowSourceFileEditWarning] = useState(false);
   const [sourceFileEditWarningAction, setSourceFileEditWarningAction] = useState<SourceFileEditWarningAction>('send-feedback');
   const sourceFileEditWarningContinuationRef = useRef<(() => void | Promise<void>) | null>(null);
-  const [showAgentWarning, setShowAgentWarning] = useState(false);
   // The decision-control note flow (#1436 mechanism): the note is committed
   // into `annotations` as a GLOBAL_COMMENT and submitted one render later,
   // because the payload builders close over `allAnnotations`. The route is
@@ -604,11 +617,11 @@ const App: React.FC = () => {
   // render-assigned ref (same pattern as headerHandlersRef) so keyboard and
   // header share literally one submitPrimaryDecision.
   const submitPrimaryDecisionRef = useRef<() => void>(() => {});
+  const [decisionNoteRequest, setDecisionNoteRequest] = useState(0);
   // The `document-view` scope is registered above `handleEditToggle`; the
   // handler is read through a render-assigned ref (same pattern as above) so
   // the chord and the card's `Edit` control share one enter path.
   const handleEditToggleRef = useRef<() => void>(() => {});
-  const [agentWarningMessage, setAgentWarningMessage] = useState('');
   const [isPanelOpen, setIsPanelOpen] = useState(() => window.innerWidth >= 768);
   const [rightSidebarTab, setRightSidebarTab] = useState<'annotations' | 'ai'>('annotations');
   const [mobileSettingsOpen, setMobileSettingsOpen] = useState(false);
@@ -623,6 +636,7 @@ const App: React.FC = () => {
   // Settings → Display → Text size and Document font: the document's blocks only.
   useDocumentTextSize();
   useDocumentFont();
+  useDocumentSourceLineNumbers();
   const vimModeEnabled = useConfigValue('vimModeEnabled');
   const vimHudEnabled = useConfigValue('vimHudEnabled');
   const vimHudKeyPanelEnabled = useConfigValue('vimHudKeyPanelEnabled');
@@ -819,6 +833,8 @@ const App: React.FC = () => {
   const [shareBaseUrl, setShareBaseUrl] = useState<string | undefined>(undefined);
   const [pasteApiUrl, setPasteApiUrl] = useState<string | undefined>(undefined);
   const [repoInfo, setRepoInfo] = useState<{ display: string; branch?: string; host?: string } | null>(null);
+  // `plannotator annotate --title` (#2289): the tab and the header name this instead.
+  const [sessionTitle, setSessionTitle] = useState<string | null>(null);
   const [projectRoot, setProjectRoot] = useState<string | null>(null);
   const [agentTerminalCapability, setAgentTerminalCapability] = useState<AgentTerminalCapability | null>(null);
   const [isAgentTerminalOpen, setIsAgentTerminalOpen] = useState(false);
@@ -835,6 +851,12 @@ const App: React.FC = () => {
   const agentTerminalRef = useRef<AnnotateAgentTerminalPanelHandle>(null);
   const [wideModeType, setWideModeType] = useState<WideModeType | null>(null);
   const wideModeSnapshotRef = useRef<WideModeLayoutSnapshot | null>(null);
+  // config.json `annotateView`: the view an annotate session opens in. Decided
+  // once, when the session's document first loads; a choice the person makes
+  // before that (or any time after) wins, and nothing is written back.
+  const [configuredAnnotateView, setConfiguredAnnotateView] = useState<AnnotateOpenView | null>(null);
+  const [pendingAnnotateOpenView, setPendingAnnotateOpenView] = useState<AnnotateOpenView | null>(null);
+  const annotateOpenViewSettledRef = useRef(false);
   const initialSidebarPreferenceAppliedRef = useRef(false);
   const lastAppliedTocEnabledRef = useRef(uiPrefs.tocEnabled);
   const goalSetupMode = goalSetupBundle !== null;
@@ -1125,13 +1147,10 @@ const App: React.FC = () => {
   });
   const isResizing = panelResize.isDragging || tocResize.isDragging || agentTerminalResize.isDragging;
 
-  // Whether the document has any TOC-eligible headings (level <= 3, matching
-  // buildTocHierarchy). Drives the empty-doc auto-close behavior below — must
+  // Whether the document has any TOC-eligible headings (tocHeadings: levels 1
+  // to 3, what the list shows). Drives the empty-doc auto-close behavior below — must
   // be declared before the effects that reference it (TDZ in dep arrays).
-  const hasTocEntries = useMemo(
-    () => blocks.some(b => b.type === 'heading' && (b.level ?? 0) <= 3),
-    [blocks]
-  );
+  const hasTocEntries = useMemo(() => tocHeadings(blocks).length > 0, [blocks]);
 
   const exitWideMode = useCallback((options?: {
     restore?: boolean;
@@ -1746,6 +1765,7 @@ const App: React.FC = () => {
   }, [canUseWideMode, hideAgentTerminal, isAgentTerminalOpen, isPanelOpen, wideModeType, sidebar.activeTab, sidebar.close, sidebar.isOpen]);
 
   const toggleViewMode = useCallback((type: WideModeType) => {
+    annotateOpenViewSettledRef.current = true;
     if (wideModeType === type) {
       exitWideMode();
     } else {
@@ -1779,7 +1799,7 @@ const App: React.FC = () => {
     if (document.querySelector('[data-plannotator-confirm-dialog="true"]')) return true;
     if (showExport || showImport ||
         showSourceFileEditWarning ||
-        showExitWarning || showAgentWarning || showPermissionModeSetup || pendingPasteImage) return true;
+        showExitWarning || showPermissionModeSetup || pendingPasteImage) return true;
     return submitted || isSubmitting || isExiting;
   }, [
     archive.archiveMode,
@@ -1788,7 +1808,6 @@ const App: React.FC = () => {
     showImport,
     showSourceFileEditWarning,
     showExitWarning,
-    showAgentWarning,
     showPermissionModeSetup,
     pendingPasteImage,
     submitted,
@@ -1841,6 +1860,7 @@ const App: React.FC = () => {
   // available everywhere: a linked-doc navigation can flip the surface to HTML
   // while focus mode is active, and without the exit path that layout is stuck.
   const handleToggleFocusMode = useCallback(() => {
+    annotateOpenViewSettledRef.current = true;
     const action = resolveFocusShortcutAction({
       canUseWideMode: canUseWideMode && !isHtmlSurface,
       wideModeType,
@@ -2170,14 +2190,14 @@ const App: React.FC = () => {
       , undefined, openOptions);
     } else if (fileBrowser.activeFile && fileBrowser.activeDirPath) {
       // When viewing a file browser doc, resolve links relative to current file's directory
-      const baseDir = linkedDocHook.filepath?.replace(/\/[^/]+$/, '') || fileBrowser.activeDirPath;
+      const baseDir = (linkedDocHook.filepath && dirnameBrowserPath(linkedDocHook.filepath)) || fileBrowser.activeDirPath;
       linkedDocHook.open(docPath, (path) =>
         `/api/doc?path=${encodeURIComponent(path)}&base=${encodeURIComponent(baseDir)}${convertHtml ? '&convert=1' : ''}`
       , undefined, openOptions);
     } else {
       // Pass the current file's directory as base for relative path resolution
       const baseDir = linkedDocHook.filepath
-        ? linkedDocHook.filepath.replace(/\/[^/]+$/, '')
+        ? dirnameBrowserPath(linkedDocHook.filepath)
         : imageBaseDir?.includes('/') ? imageBaseDir : planDir;
       if (baseDir) {
         linkedDocHook.open(docPath, (path) =>
@@ -2290,7 +2310,7 @@ const App: React.FC = () => {
     if (bundleIndex >= 0) return null;
     const root = bundleBackPath ?? sourceFilePath;
     if (!root) return 'Back';
-    return `Back to ${root.split('/').pop() || root}`;
+    return `Back to ${basenameFromPath(root)}`;
   }, [isHtmlSurface, linkedDocHook.isActive, sourceFilePath, bundleIndex, bundleBackPath]);
 
   // Wrap linked doc back to also clear file browser active file
@@ -2817,6 +2837,15 @@ const App: React.FC = () => {
     return getEditedMarkdown();
   }, [editableDocuments, getEditedMarkdown]);
 
+  // This page load's id for the per-document copies (`?client=`): the
+  // decision sends it too, so the server clears only the copies this page
+  // read, wrote or restored, never ones an earlier page left (#1545).
+  const [draftClientId] = useState(() => `${Date.now()}-${generateId()}`);
+  const withDraftClient = useCallback((path: string): string => {
+    const separator = path.includes('?') ? '&' : '?';
+    return `${path}${separator}client=${encodeURIComponent(draftClientId)}`;
+  }, [draftClientId]);
+
   // Every other document's comments, saved under that document's own path.
   const {
     unbackedPaths: unbackedDraftDocuments,
@@ -2825,6 +2854,7 @@ const App: React.FC = () => {
     discardCopies: discardDocumentCopies,
   } = useDocumentDrafts({
     enabled: documentDraftsEnabled && isApiMode && !isSharedSession && !goalSetupMode && !documentReadOnly,
+    clientId: draftClientId,
     submitted: !!submitted || isSubmitting,
     activePath: linkedDocHook.filepath,
     rootPath: sourceFilePath ?? null,
@@ -2864,7 +2894,7 @@ const App: React.FC = () => {
   );
 
   // Auto-save annotation drafts
-  const { draftBanner, restoreDraft, scheduleDraftSave, scheduleDraftSaveAfterSubmitFailure, getDraftGeneration, dismissDraft, flushPendingSave: flushSessionDraft } = useAnnotationDraft({
+  const annotateDraft = useAnnotationDraft({
     annotations: draftAnnotations,
     codeAnnotations,
     globalAttachments: draftGlobalAttachments,
@@ -2878,6 +2908,7 @@ const App: React.FC = () => {
     // banner into the next session for this plan. Saving resumes if it fails.
     submitted: !!submitted || isSubmitting,
   });
+  const { draftBanner, draftChecked, restoreDraft, scheduleDraftSave, scheduleDraftSaveAfterSubmitFailure, getDraftGeneration, dismissDraft, flushPendingSave: flushSessionDraft } = annotateDraft;
   flushPendingDraftsRef.current = () => {
     flushSessionDraft();
     flushDocumentDrafts();
@@ -2910,8 +2941,9 @@ const App: React.FC = () => {
   const canEditMarkdown =
     // Diagram sources (.mmd/.dot) are excluded with HTML: the surface is the
     // diagram, not a text column, and Edit Mode would show a code editor over
-    // a document that never renders as markdown.
-    renderAs === 'markdown' &&
+    // a document that never renders as markdown. A config file (`code`) stays
+    // editable: it was a markdown-rendered text file before it got its own view.
+    (renderAs === 'markdown' || renderAs === 'code') &&
     // editStats non-null keeps the toggle available after committing an
     // emptied document, so the user can re-enter and undo. Source-backed files
     // are editable even when they start empty.
@@ -3306,6 +3338,7 @@ const App: React.FC = () => {
   }, [isEditingMarkdown, usesDocumentScroll]);
 
   const handleEditToggle = useCallback(() => {
+    annotateOpenViewSettledRef.current = true;
     captureEditScroll();
     if (isEditingMarkdown) {
       commitMarkdownEdits();
@@ -3337,6 +3370,33 @@ const App: React.FC = () => {
     setIsEditingMarkdown(true);
   }, [activeEditableDocument, displayedMarkdown, editableDocuments, isEditingMarkdown, commitMarkdownEdits, captureEditScroll]);
   handleEditToggleRef.current = handleEditToggle;
+
+  // Open the annotate session in its configured view (config.json
+  // `annotateView`), once. A view the toolbar does not offer here falls back
+  // to today's default; Edit also waits for the saved-draft lookup and stays
+  // off when a draft is offered, so restoring it is never refused.
+  useEffect(() => {
+    if (annotateOpenViewSettledRef.current || isLoading || !isApiMode) return;
+    if (configuredAnnotateView === 'edit' && !draftChecked) return;
+    annotateOpenViewSettledRef.current = true;
+    const view = resolveAnnotateOpenView(configuredAnnotateView, {
+      toolbarShown: annotateMode && !isCompactTouchLayout && !isPlanDiffActive && !archive.archiveMode && !isHtmlSurface
+        && !goalSetupMode && !(annotateSource === 'folder' && !markdown && !linkedDocHook.isActive),
+      canUseWideMode,
+      canEditMarkdown,
+    });
+    if (view === 'edit' && draftBanner) return;
+    // Applied on the next render, after the initial sidebar effect's own
+    // update, so leaving the view restores the layout the session opened with.
+    if (view) setPendingAnnotateOpenView(view);
+  }, [annotateMode, annotateSource, archive.archiveMode, canEditMarkdown, canUseWideMode, configuredAnnotateView, draftBanner, draftChecked, goalSetupMode, isApiMode, isCompactTouchLayout, isHtmlSurface, isLoading, isPlanDiffActive, linkedDocHook.isActive, markdown]);
+  useEffect(() => {
+    if (!pendingAnnotateOpenView) return;
+    setPendingAnnotateOpenView(null);
+    if (wideModeType !== null || isEditingMarkdown) return;
+    if (pendingAnnotateOpenView === 'edit') handleEditToggle();
+    else enterViewMode(pendingAnnotateOpenView);
+  }, [enterViewMode, handleEditToggle, isEditingMarkdown, pendingAnnotateOpenView, wideModeType]);
 
   // Restore after the swap has committed. Two timing facts decide the shape:
   // the editor publishes its handle, and establishes its height, in its own
@@ -3933,7 +3993,7 @@ const App: React.FC = () => {
         if (!res.ok) throw new Error('Not in API mode');
         return res.json();
       })
-      .then((data: { plan: string; origin?: Origin; mode?: 'annotate' | 'annotate-last' | 'annotate-folder' | 'annotate-app' | 'annotate-bundle' | 'archive' | 'goal-setup'; bundle?: unknown; goalSetup?: GoalSetupBundle; filePath?: string; appUrl?: string; targetUrl?: string; liveToken?: string; sourceInfo?: string; sourceConverted?: boolean; sourceSave?: SourceSaveCapability; gate?: boolean; approvalNotesSupported?: boolean; clientLease?: AnnotateClientLeaseConfig; renderAs?: DocumentRenderAs; rawHtml?: string; shareHtml?: string; diffHtml?: string; convertHtml?: boolean; sharingEnabled?: boolean; shareBaseUrl?: string; pasteApiUrl?: string; repoInfo?: { display: string; branch?: string; host?: string }; previousPlan?: string | null; versionInfo?: { version: number; totalVersions: number; project: string }; liveVersions?: boolean; planRevision?: number; serverSession?: string; archivePlans?: ArchivedPlan[]; projectRoot?: string; planDir?: string; planPath?: string; planFilePath?: string; isWSL?: boolean; notion?: boolean; markdownExtensions?: string[]; documentDrafts?: boolean; serverConfig?: { displayName?: string; gitUser?: string; autoUpdate?: boolean; autoUpdateEnv?: boolean; updateCheck?: boolean; updateCheckEnv?: boolean }; autoUpdateNotice?: unknown; updateAvailable?: unknown; updateCheckFailing?: unknown; autoUpdateSupported?: boolean; autoUpdateActive?: boolean; recentMessages?: PickerMessage[]; agentTerminal?: AgentTerminalCapability; feedbackTemplates?: AnnotateFeedbackTemplates }) => {
+      .then((data: { plan: string; origin?: Origin; mode?: 'annotate' | 'annotate-last' | 'annotate-folder' | 'annotate-app' | 'annotate-bundle' | 'archive' | 'goal-setup'; bundle?: unknown; goalSetup?: GoalSetupBundle; filePath?: string; appUrl?: string; targetUrl?: string; liveToken?: string; sourceInfo?: string; title?: string; sourceConverted?: boolean; sourceSave?: SourceSaveCapability; gate?: boolean; approvalNotesSupported?: boolean; clientLease?: AnnotateClientLeaseConfig; renderAs?: DocumentRenderAs; rawHtml?: string; shareHtml?: string; diffHtml?: string; convertHtml?: boolean; sharingEnabled?: boolean; shareBaseUrl?: string; pasteApiUrl?: string; repoInfo?: { display: string; branch?: string; host?: string }; previousPlan?: string | null; versionInfo?: { version: number; totalVersions: number; project: string }; liveVersions?: boolean; planRevision?: number; serverSession?: string; archivePlans?: ArchivedPlan[]; projectRoot?: string; planDir?: string; planPath?: string; planFilePath?: string; isWSL?: boolean; notion?: boolean; markdownExtensions?: string[]; documentDrafts?: boolean; serverConfig?: { displayName?: string; gitUser?: string; annotateView?: unknown; autoUpdate?: boolean; autoUpdateEnv?: boolean; updateCheck?: boolean; updateCheckEnv?: boolean }; autoUpdateNotice?: unknown; updateAvailable?: unknown; updateCheckFailing?: unknown; autoUpdateSupported?: boolean; autoUpdateActive?: boolean; recentMessages?: PickerMessage[]; agentTerminal?: AgentTerminalCapability; feedbackTemplates?: AnnotateFeedbackTemplates }) => {
         // Initialize config store with server-provided values (config file > cookie > default)
         configStore.init(data.serverConfig);
         // Save to Notion: offered only when the server has NOTION_TOKEN and the session is local.
@@ -4004,8 +4064,9 @@ const App: React.FC = () => {
           // A bundle opens its first file once loaded (see the effect below).
           setMarkdown('');
         } else if (typeof data.plan === 'string') {
-          // An .adoc file renders through the AsciiDoc block parser.
-          if (data.renderAs === 'asciidoc') setRenderAs('asciidoc');
+          // An .adoc file renders through the AsciiDoc block parser, and a
+          // config or data file (.toml, .yaml, …) as one code block.
+          if (data.renderAs === 'asciidoc' || data.renderAs === 'code') setRenderAs(data.renderAs);
           // CM6 joins lines with \n; CRLF input would make an untouched
           // edit round-trip fabricate a whole-document diff. Normalize once.
           const normalizedPlan = data.plan.replace(/\r\n?/g, '\n');
@@ -4029,6 +4090,7 @@ const App: React.FC = () => {
         setApprovalNotesSupported(data.approvalNotesSupported === true);
         if (data.mode === 'annotate' || data.mode === 'annotate-last' || folderLike || data.mode === 'annotate-app') {
           setAnnotateMode(true);
+          setConfiguredAnnotateView(parseAnnotateOpenView(data.serverConfig?.annotateView));
           setGate(data.gate ?? false);
           setClientLease(data.clientLease ?? null);
         }
@@ -4054,7 +4116,16 @@ const App: React.FC = () => {
         setFeedbackTemplates(data.feedbackTemplates ?? null);
         setSourceConverted(!!data.sourceConverted);
         if (data.filePath) {
-          setImageBaseDir(folderLike ? data.filePath : data.filePath.replace(/\/[^/]+$/, ''));
+          // A local path's base uses forward slashes on every platform: the
+          // `includes('/')` checks on imageBaseDir tell a real path from
+          // annotate-last's `last-message`, and a Windows `C:\docs\a.md` has
+          // none. A URL keeps its own slashes.
+          const isUrlTarget = /^https?:\/\//i.test(data.filePath);
+          setImageBaseDir(
+            folderLike ? normalizeBrowserPath(data.filePath)
+              : isUrlTarget ? data.filePath.replace(/\/[^/]+$/, '')
+              : dirnameBrowserPath(data.filePath),
+          );
           if (data.mode === 'annotate') {
             setSourceFilePath(data.filePath);
           }
@@ -4076,6 +4147,9 @@ const App: React.FC = () => {
         }
         if (data.repoInfo) {
           setRepoInfo(data.repoInfo);
+        }
+        if (typeof data.title === 'string' && data.title) {
+          setSessionTitle(data.title);
         }
         if (data.projectRoot) {
           setProjectRoot(data.projectRoot);
@@ -4595,7 +4669,7 @@ const App: React.FC = () => {
       }
       sentFeedback = body.feedback;
 
-      const res = await fetch('/api/approve', {
+      const res = await fetch(withDraftClient('/api/approve'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(withServerSession(body)),
@@ -4640,7 +4714,7 @@ const App: React.FC = () => {
       const planSaveSettings = getPlanSaveSettings();
       const payload = getCurrentFeedbackPayload(checkedSavedFileChanges);
       sentPayload = payload;
-      const res = await fetch('/api/deny', {
+      const res = await fetch(withDraftClient('/api/deny'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(withServerSession({
@@ -4761,7 +4835,7 @@ const App: React.FC = () => {
         // host that must not start an agent turn for it can tell (#1701).
         ...(isEmptyFeedbackSentinel(feedback) ? { nothingToSend: true } : {}),
       };
-      const res = await fetch('/api/feedback', {
+      const res = await fetch(withDraftClient('/api/feedback'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(withServerSession(body)),
@@ -4825,7 +4899,7 @@ const App: React.FC = () => {
         ? getCurrentFeedbackPayload(checkedSavedFileChanges)
         : '';
       sentFeedback = feedback;
-      const res = await fetch('/api/approve', {
+      const res = await fetch(withDraftClient('/api/approve'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(withServerSession(buildAnnotateApprovalBody({
@@ -4865,7 +4939,7 @@ const App: React.FC = () => {
   const handleAnnotateExit = useCallback(async () => {
     setIsExiting(true);
     try {
-      const res = await fetch(withServerSessionQuery(withDraftGeneration('/api/exit')), { method: 'POST' });
+      const res = await fetch(withDraftClient(withServerSessionQuery(withDraftGeneration('/api/exit'))), { method: 'POST' });
       if (await noteServerSessionMismatch(res)) {
         setIsExiting(false);
         return;
@@ -4878,7 +4952,7 @@ const App: React.FC = () => {
     } catch {
       setIsExiting(false);
     }
-  }, [withDraftGeneration]);
+  }, [withDraftGeneration, withDraftClient]);
 
   const handleGoalSetupSubmit = useCallback(() => {
     goalSetupSurfaceRef.current?.submit();
@@ -4944,7 +5018,7 @@ const App: React.FC = () => {
       // Don't intercept if any modal is open
       if (showExport || showImport ||
           showSourceFileEditWarning ||
-          showExitWarning || showAgentWarning || showPermissionModeSetup || pendingPasteImage) return;
+          showExitWarning || showPermissionModeSetup || pendingPasteImage) return;
 
       // Don't intercept if already submitted, submitting, or exiting
       if (submitted || isSubmitting || isExiting || goalSetupAction.isSubmitting) return;
@@ -4976,6 +5050,12 @@ const App: React.FC = () => {
 
       e.preventDefault();
 
+      // Mod+Shift+Enter opens the note composer instead of submitting.
+      if (e.shiftKey) {
+        setDecisionNoteRequest((n) => n + 1);
+        return;
+      }
+
       // Mod+Enter always equals the visible header primary, in annotate and
       // plan review alike: one submitPrimaryDecision for keyboard, header and
       // compact (spec §4; #1057 brought plan review onto it).
@@ -4985,7 +5065,7 @@ const App: React.FC = () => {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [
-    showExport, showImport, showSourceFileEditWarning, showExitWarning, showAgentWarning,
+    showExport, showImport, showSourceFileEditWarning, showExitWarning,
     showPermissionModeSetup, pendingPasteImage,
     submitted, isSubmitting, isExiting, goalSetupAction.isSubmitting, isApiMode, documentReadOnly, isEditingMarkdown, linkedDocHook.isActive, annotations.length, codeAnnotations.length, externalAnnotations.length, annotateMode,
     hasFeedbackToSend, goalSetupMode, goalSetupAction.canSubmit, isAgentTerminalReady,
@@ -6197,7 +6277,7 @@ const App: React.FC = () => {
 
       if (showExport ||
           showSourceFileEditWarning ||
-          showExitWarning || showAgentWarning || showPermissionModeSetup || pendingPasteImage) return;
+          showExitWarning || showPermissionModeSetup || pendingPasteImage) return;
 
       if (submitted || !isApiMode) return;
 
@@ -6234,28 +6314,36 @@ const App: React.FC = () => {
     window.addEventListener('keydown', handleSaveShortcut);
     return () => window.removeEventListener('keydown', handleSaveShortcut);
   }, [
-    showExport, showSourceFileEditWarning, showExitWarning, showAgentWarning,
+    showExport, showSourceFileEditWarning, showExitWarning,
     showPermissionModeSetup, pendingPasteImage,
     submitted, isApiMode, documentReadOnly, isEditingMarkdown, handleSaveEditedSourceFile, displayedMarkdown, annotationsOutput,
   ]);
 
-  // Cmd/Ctrl+P keyboard shortcut — print plan
+  const handlePrint = useCallback(() => {
+    if (isHtmlSurface && viewerRef.current?.print) {
+      viewerRef.current.print();
+    } else {
+      window.print();
+    }
+  }, [isHtmlSurface]);
+
+  // Cmd/Ctrl+P keyboard shortcut — print the active document
   useEffect(() => {
     const handlePrintShortcut = (e: KeyboardEvent) => {
       const blocked = showExport ||
           showSourceFileEditWarning ||
-          showExitWarning || showAgentWarning || showPermissionModeSetup || !!pendingPasteImage || submitted;
+          showExitWarning || showPermissionModeSetup || !!pendingPasteImage || submitted;
       if (!shouldPrintOnKey(e, blocked)) return;
 
       e.preventDefault();
-      window.print();
+      handlePrint();
     };
 
     window.addEventListener('keydown', handlePrintShortcut);
     return () => window.removeEventListener('keydown', handlePrintShortcut);
   }, [
-    showExport, showSourceFileEditWarning, showExitWarning, showAgentWarning,
-    showPermissionModeSetup, pendingPasteImage, submitted,
+    showExport, showSourceFileEditWarning, showExitWarning,
+    showPermissionModeSetup, pendingPasteImage, submitted, handlePrint,
   ]);
 
   const agentName = useMemo(() => getAgentName(origin), [origin]);
@@ -6304,36 +6392,22 @@ const App: React.FC = () => {
 
   // --- Plan review's decision control (#1057) -----------------------------
   // Every plan approval goes through requestPlanApprove, so the unsaved file
-  // edit warning and OpenCode's "Agent Not Found" check run on every approve
-  // path (the primary, Approve with notes, the discard confirm, a note). The
-  // Agent Not Found dialog's "Approve Anyway" runs the captured continuation,
-  // so a confirmed discard stays a bare approval there too. Both resolve true
-  // only once the decision is recorded.
-  const agentWarningContinuationRef = useRef<(() => void) | null>(null);
+  // edit warning runs on every approve path (the primary, Approve with notes,
+  // the discard confirm, a note). It resolves true only once the decision is
+  // recorded. An OpenCode agent set to run after approval that OpenCode does
+  // not have never holds the approval up: OpenCode approves without
+  // switching and its toast names the agent it could not find (agent-switch.ts).
   const requestPlanApprove = useCallback((options?: { discardFeedback?: boolean }): Promise<boolean> =>
     new Promise<boolean>((resolve) => {
       const approve = () => {
-        const h = headerHandlersRef.current;
-        if (origin === 'opencode') {
-          const warning = h.getAgentWarning();
-          if (warning) {
-            agentWarningContinuationRef.current = () => {
-              void headerHandlersRef.current.handleApprove(options);
-            };
-            setAgentWarningMessage(warning);
-            setShowAgentWarning(true);
-            resolve(false);
-            return;
-          }
-        }
-        void h.handleApprove(options).then(resolve);
+        void headerHandlersRef.current.handleApprove(options).then(resolve);
       };
       if (maybeConfirmUnsavedSourceFileEdits('approve', approve)) {
         resolve(false);
         return;
       }
       approve();
-    }), [maybeConfirmUnsavedSourceFileEdits, origin]);
+    }), [maybeConfirmUnsavedSourceFileEdits]);
 
   // Deny carries every kind of feedback (direct edits included): on Claude
   // Code's classic hook it is the only channel whose output reaches the agent.
@@ -6366,11 +6440,11 @@ const App: React.FC = () => {
     if (pendingDispatchInFlightRef.current) return;
     const { route, approvalFraming } = pending;
     if (!annotateMode) {
-      // Plan review: the request helpers own the unsaved-edit and agent
-      // warnings. A note queued on 'approve' rides the approval's notes.
+      // Plan review: the request helpers own the unsaved-edit warning. A note
+      // queued on 'approve' rides the approval's notes.
       // Unlike annotate (L3), a plan decision is NEVER left armed: after a
-      // refusal (409 plan_revised), a cancelled warning (Agent Not Found,
-      // unsaved file edits) or a failed POST, the note is an ordinary general
+      // refusal (409 plan_revised), a cancelled warning (unsaved file edits)
+      // or a failed POST, the note is an ordinary general
       // comment and the primary means what its label says (Send Feedback),
       // so the reviewer decides again from scratch. A warning confirmed later
       // runs its own continuation, which posts the decision on its own.
@@ -6691,7 +6765,6 @@ const App: React.FC = () => {
   const handleOpenSettings = useCallback(() => setMobileSettingsOpen(true), []);
   const handleCloseSettings = useCallback(() => setMobileSettingsOpen(false), []);
   const handleOpenExport = useCallback(() => { setInitialExportTab(undefined); setShowExport(true); }, []);
-  const handlePrint = useCallback(() => window.print(), []);
   const handleOpenImport = useCallback(() => setShowImport(true), []);
   const handleSaveToObsidian = useCallback(() => headerHandlersRef.current.handleQuickSaveToNotes('obsidian'), []);
   const handleSaveToOctarine = useCallback(() => headerHandlersRef.current.handleQuickSaveToNotes('octarine'), []);
@@ -6703,6 +6776,13 @@ const App: React.FC = () => {
   const planHeading = useMemo(
     () => blocks.find((block) => block.type === 'heading')?.content ?? null,
     [blocks],
+  );
+  // Settings → General → "Hide the repository owner" names the repository in
+  // the tab title as the document header's chip does.
+  const hideRepoOwner = useConfigValue('hideRepoOwner');
+  const titleRepo = useMemo(
+    () => repoInfo && { ...repoInfo, display: repoLabel(repoInfo.display, hideRepoOwner) },
+    [repoInfo, hideRepoOwner],
   );
   const documentTitleInput = useMemo<DocumentTitleInput>(() => ({
     apiMode: isApiMode,
@@ -6719,8 +6799,9 @@ const App: React.FC = () => {
     liveAppUrl: liveApp?.targetUrl ?? null,
     planHeading,
     archiveTitle: archive.currentInfo?.title ?? null,
-    repo: repoInfo,
-  }), [annotateMode, annotateSource, archive.archiveMode, archive.currentInfo?.title, bundleFiles, bundleIndex, fileBrowser.activeFile, goalSetupMode, isApiMode, linkedDocHook.filepath, liveApp?.targetUrl, planHeading, repoInfo, sessionFolderPath, sourceFilePath]);
+    repo: titleRepo,
+    sessionTitle,
+  }), [annotateMode, annotateSource, archive.archiveMode, archive.currentInfo?.title, bundleFiles, bundleIndex, fileBrowser.activeFile, goalSetupMode, isApiMode, linkedDocHook.filepath, liveApp?.targetUrl, planHeading, titleRepo, sessionFolderPath, sessionTitle, sourceFilePath]);
   const compactDocumentTitle = useMemo(() => resolveCompactDocumentTitle(documentTitleInput), [documentTitleInput]);
   const headerDocumentName = useMemo(() => documentHeaderName(documentTitleInput), [documentTitleInput]);
   const tabTitle = useMemo(() => documentTabTitle(documentTitleInput), [documentTitleInput]);
@@ -7177,6 +7258,15 @@ const App: React.FC = () => {
     autoUpdateActive,
     suppressed: openedWithHash || isSharedSession || archive.archiveMode || !isApiMode,
   });
+  // The "Star the repo" ask (approval "star-ask"): claimed once the page loads (the server stops on the decision),
+  // shown on the done screen only, once a decision was sent (approved, feedback, done; never a closed session or goal
+  // setup's answers), with the announcements' gates (never a shared, archive or read-only page, the share portal, or
+  // the VS Code webview). The server decides the rest.
+  const starAskFooter = useStarAskDoneScreen({
+    ready: !isLoading,
+    decided: (submitted === 'approved' || submitted === 'denied' || submitted === 'done') && !goalSetupMode,
+    eligible: isApiMode && !goalSetupMode && !isSharedSession && !archive.archiveMode && !isVSCodeWebview(),
+  });
   // Read from the host alone, not agentToolOfferApplies: once "Turn it on"
   // succeeds the setting is on, and the open offer must stay to say so.
   const agentToolOfferHost = agentToolOfferHostOf(agentTool.setting);
@@ -7502,6 +7592,7 @@ const App: React.FC = () => {
           questionProgress={headerQuestionProgress}
           annotateDecision={annotateMode ? annotateDecision : undefined}
           planDecision={annotateMode ? undefined : planDecision}
+          decisionNoteRequest={decisionNoteRequest}
           callbackConfig={callbackConfig}
           taterMode={taterMode}
           mobileSettingsOpen={mobileSettingsOpen}
@@ -7513,7 +7604,7 @@ const App: React.FC = () => {
           onAgentToolChange={agentTool.save}
           agentTerminalAvailable={showAgentTerminalControls}
           webmcpAvailable={webmcp.available}
-          documentTextSizeAvailable={renderAs === 'markdown' || renderAs === 'asciidoc'}
+          documentTextSizeAvailable={renderAs === 'markdown' || renderAs === 'asciidoc' || renderAs === 'code'}
           agentConnected={webmcpActivity.calls > 0}
           onCallbackFeedback={handleCallbackFeedback}
           onCallbackApprove={handleCallbackApprove}
@@ -7807,6 +7898,7 @@ const App: React.FC = () => {
                     selectedAnnotationId={selectedAnnotationId}
                     mode={effectiveEditorMode}
                     fillHeight={gridDiffPaperFillsView}
+                    codeDocument={planDiffCodeDocument}
                   />
                 </div>
               )}
@@ -8293,32 +8385,6 @@ const App: React.FC = () => {
           />
         )}
 
-        {/* OpenCode agent not found warning dialog */}
-        <ConfirmDialog
-          isOpen={showAgentWarning}
-          onClose={() => {
-            agentWarningContinuationRef.current = null;
-            setShowAgentWarning(false);
-          }}
-          onConfirm={() => {
-            const approve = agentWarningContinuationRef.current ?? (() => { void handleApprove(); });
-            agentWarningContinuationRef.current = null;
-            setShowAgentWarning(false);
-            approve();
-          }}
-          title="Agent Not Found"
-          message={agentWarningMessage}
-          subMessage={
-            <>
-              You can change the agent in <strong>Settings</strong>, or approve anyway and OpenCode will use the default agent.
-            </>
-          }
-          confirmText="Approve Anyway"
-          cancelText="Cancel"
-          variant="warning"
-          showCancel
-        />
-
         {/* Shared URL load failure warning */}
         <ConfirmDialog
           isOpen={!!shareLoadError && !isApiMode}
@@ -8416,6 +8482,7 @@ const App: React.FC = () => {
                     : `${agentName} will revise the plan based on your feedback.`
           }
           agentLabel={agentName}
+          footer={starAskFooter}
         />
 
         <LookAndFeelAnnouncementDialog

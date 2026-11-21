@@ -78,10 +78,10 @@ describe("send_message: the line naming a thread the session has not read", () =
     const root = await send(client, project, "ses-a", { body: "Shipped the retry fix.", subject: "Retry fix" });
     const followUp = await send(client, project, "ses-a", { body: "Also the docs.", reply_to: root.structuredContent.message_id });
     expect(text(followUp)).not.toMatch(WARNING);
-    // A default-routed follow-up (no reply_to) into the session's open thread: no line either.
+    // No reply_to and no thread: a new thread, so no line either.
     expect(text(await send(client, project, "ses-a", { body: "And the changelog." }))).not.toMatch(WARNING);
     later(INBOX_THREAD_STALE_MS + HOURS);
-    // Routed by default (no reply_to, no thread): it goes where the session's own messages went, so no line.
+    // The same hours later: it names no thread, so no line.
     expect(text(await send(client, project, "ses-a", { body: "Back after lunch." }))).not.toMatch(/its subject is/);
     later(INBOX_THREAD_STALE_MS + HOURS);
     // Named by reply_to: the line, worded for the thread's starter, never "you have not read".
@@ -91,8 +91,8 @@ describe("send_message: the line naming a thread the session has not read", () =
     expect(typeof stale.structuredContent.not_read_since).toBe("string");
   });
 
-  test("read_thread, a list that showed the row, and wait_for_reply count as reads; the line then says since when", async () => {
-    const { server, client, project, later } = await setup();
+  test("read_thread and a list that showed the row count as reads; the line then says since when", async () => {
+    const { client, project, later } = await setup();
     const root = await send(client, project, "ses-a", { body: "Which columns?", subject: "Board columns" });
     const threadId = root.structuredContent.thread_id as string;
 
@@ -110,21 +110,6 @@ describe("send_message: the line naming a thread the session has not read", () =
     const listed = await call(client, "read_thread", { project_path: project, agent_session: "ses-b", asked_by: "anyone" });
     expect(text(listed)).toContain(threadId);
     expect(text(await send(client, project, "ses-b", { body: "Checked the subject first.", reply_to: threadId }))).not.toMatch(WARNING);
-
-    // wait_for_reply returning the person's reply counts too.
-    later(INBOX_THREAD_STALE_MS + HOURS);
-    const asked = await send(client, project, "ses-c", { body: "Ship it?", reply_to: threadId });
-    expect(text(asked)).toMatch(WARNING);
-    const waiting = call(client, "wait_for_reply", { thread_id: threadId, agent_session: "ses-c", timeout_seconds: 10 });
-    await Bun.sleep(100);
-    const reply = await fetch(`http://127.0.0.1:${server.port}/api/inbox/messages/${asked.structuredContent.message_id}/reply`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ serverSession: server.serverSession, words: "Yes.", idempotency_key: "r1" }),
-    });
-    expect(reply.status).toBe(200);
-    expect((await waiting).structuredContent.status).toBe("replied");
-    expect(text(await send(client, project, "ses-c", { body: "Shipping.", reply_to: threadId }))).not.toMatch(WARNING);
   });
 
   test("a message the wake delivered counts as read: answering it raises no line, while the same answer to one never delivered does", async () => {
@@ -195,8 +180,9 @@ describe("the connections' peek (the session's thread list)", () => {
     expect(peek.isError).toBeFalsy();
     expect(inboxSessionThreadsText(peek, "plannotator_inbox")).toBeNull();
     expect(server.store.listProjects()).toHaveLength(0);
-    // Without the mark the same list makes the project (as before): the mark is what keeps it out.
-    await call(client, "read_thread", params.arguments as Record<string, unknown>);
-    expect(server.store.listProjects()).toHaveLength(1);
+    // The agent's own list (no mark) makes none either: a read is not a write, as search.
+    const own = await call(client, "read_thread", params.arguments as Record<string, unknown>);
+    expect(own.isError).toBeFalsy();
+    expect(server.store.listProjects()).toHaveLength(0);
   });
 });

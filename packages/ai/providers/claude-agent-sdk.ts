@@ -29,6 +29,7 @@ import {
   type CatalogModel,
   type ClaudeSdkModelInfo,
 } from "@plannotator/core/model-catalog";
+import { askAiChildEnv } from "./ask-ai-env.ts";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -147,6 +148,8 @@ interface ClaudeSDKQueryOptions {
   model?: string;
   maxTurns: number;
   allowedTools: string[];
+  /** The built-in tools on offer; `[]` turns them all off. */
+  tools?: string[];
   cwd: string;
   abortController: AbortController;
   includePartialMessages: boolean;
@@ -159,9 +162,22 @@ interface ClaudeSDKQueryOptions {
   allowDangerouslySkipPermissions?: boolean;
   pathToClaudeCodeExecutable?: string;
   settingSources?: string[];
+  settings?: { disableAllHooks?: boolean };
   effort?: string;
   strictMcpConfig?: boolean;
+  /** The whole env of the `claude` process (the SDK does not merge it with process.env). */
+  env: Record<string, string | undefined>;
+  disallowedTools: string[];
 }
+
+/**
+ * Removed from every Ask AI session whatever the person's settings allow: the
+ * Plannotator Inbox MCP server, by its whole-server name (`mcp__<server>`, a
+ * server-level spec the SDK's `disallowedTools` takes). This covers an
+ * HTTP-transport `plannotator-inbox` entry too, which the env marker
+ * (ask-ai-env.ts) cannot reach.
+ */
+const ASK_AI_DISALLOWED_TOOLS = ["mcp__plannotator-inbox"];
 
 // ---------------------------------------------------------------------------
 // Provider
@@ -191,10 +207,11 @@ export class ClaudeAgentSDKProvider implements AIProvider {
   async createSession(options: CreateSessionOptions): Promise<AISession> {
     return new ClaudeAgentSDKSession({
       ...this.baseConfig(options),
-      systemPrompt: buildSystemPrompt(options.context),
+      systemPrompt: options.oneShot?.systemPrompt ?? buildSystemPrompt(options.context),
       cwd: options.cwd ?? this.config.cwd ?? process.cwd(),
       parentSessionId: null,
       forkFromSession: null,
+      oneShot: !!options.oneShot,
     });
   }
 
@@ -280,6 +297,7 @@ export class ClaudeAgentSDKProvider implements AIProvider {
           // option out, so the SDK loads every source, like the CLI.
           settingSources: [],
           strictMcpConfig: true,
+          env: askAiChildEnv(),
           ...(this.config.claudeExecutablePath && {
             pathToClaudeCodeExecutable: this.config.claudeExecutablePath,
           }),
@@ -365,6 +383,8 @@ interface SessionConfig {
   resumeSessionId?: string;
   claudeExecutablePath?: string;
   settingSources?: string[];
+  /** A single judgment (`CreateSessionOptions.oneShot`). */
+  oneShot?: boolean;
 }
 
 class ClaudeAgentSDKSession extends BaseSession {
@@ -461,10 +481,15 @@ class ClaudeAgentSDKSession extends BaseSession {
       ...(this.config.effort && { effort: this.config.effort }),
       maxTurns: this.config.maxTurns,
       allowedTools: this.config.allowedTools,
+      disallowedTools: ASK_AI_DISALLOWED_TOOLS,
       cwd: this.config.cwd,
       abortController: this._currentAbort!,
       includePartialMessages: true,
       persistSession: true,
+      // Plannotator's integration off in this `claude` (ask-ai-env.ts): the
+      // plugin's ExitPlanMode hook exits at once instead of opening a review.
+      // The SDK replaces the child's env with this, so it is the full live env.
+      env: askAiChildEnv(),
       ...(this.config.claudeExecutablePath && {
         pathToClaudeCodeExecutable: this.config.claudeExecutablePath,
       }),
@@ -475,6 +500,22 @@ class ClaudeAgentSDKSession extends BaseSession {
 
     if (this.config.maxBudgetUsd) {
       opts.maxBudgetUsd = this.config.maxBudgetUsd;
+    }
+
+    // A single judgment: only this prompt, no tools, no MCP servers, no hooks and
+    // no session left behind. Settings load as they do for Ask AI: they can say
+    // where this person's Claude sends code (Bedrock, Vertex), and leaving them
+    // out would send a diff to whatever login it has instead.
+    if (this.config.oneShot) {
+      return {
+        ...opts,
+        systemPrompt: this.config.systemPrompt ?? "",
+        tools: [],
+        allowedTools: [],
+        settings: { disableAllHooks: true },
+        strictMcpConfig: true,
+        persistSession: false,
+      };
     }
 
     // After the first query resolves a real session ID, all subsequent

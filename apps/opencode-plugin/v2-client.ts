@@ -11,7 +11,7 @@ import type { OpenCodeBridgeAgent } from "./cli-bridge";
 
 /** The subset of the V2 session domain this plugin touches. */
 export interface V2SessionDomain {
-  get?: (input: { sessionID: string }) => Promise<{ location?: { directory?: string } }>;
+  get?: (input: { sessionID: string }) => Promise<{ location?: { directory?: string }; title?: string }>;
   prompt?: (input: {
     sessionID: string;
     text: string;
@@ -252,8 +252,14 @@ export function toBridgeMessages(context: unknown): unknown[] {
       // V2 assistant messages record their writer (`Session.Message.Assistant`
       // carries `agent: Agent.ID`); /plannotator-last routes feedback to it.
       ...(typeof message.agent === "string" && message.agent ? { agent: message.agent } : {}),
+      // `pickRecentAssistantMessages` reads where a turn ends from these.
+      ...(message.error !== undefined ? { error: message.error } : {}),
+      ...(typeof message.finish === "string" ? { finish: message.finish } : {}),
     },
-    parts: Array.isArray(message.content) ? message.content : [],
+    // User and synthetic rows carry `text`, not `content`.
+    parts: Array.isArray(message.content) ? message.content
+      : typeof message.text === "string" ? [{ type: "text", text: message.text }]
+      : [],
   }));
 }
 

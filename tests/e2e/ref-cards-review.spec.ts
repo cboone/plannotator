@@ -182,6 +182,7 @@ async function start(kind: 'plan' | 'annotate' | 'review'): Promise<Session> {
   const env = {
     PATH: `${forge.dir}:${process.env.PATH ?? ''}`,
     HOME: root,
+    PLANNOTATOR_RELAY_URL: 'http://127.0.0.1:9',
     PLANNOTATOR_DATA_DIR: dataDir,
     PLANNOTATOR_READY_FILE: readyFile,
     PLANNOTATOR_BROWSER: NO_BROWSER,
@@ -214,19 +215,23 @@ async function start(kind: 'plan' | 'annotate' | 'review'): Promise<Session> {
   }
   await expect.poll(() => (existsSync(readyFile) ? readFileSync(readyFile, 'utf8') : ''), { timeout: 30_000 }).toContain('"url"');
   const url = (JSON.parse(readFileSync(readyFile, 'utf8').trim().split('\n')[0]!) as { url: string }).url;
+  /** Resolves when the child has exited, or after `ms`. */
+  const exited = (ms: number) =>
+    new Promise<void>((done) => {
+      if (child.exitCode !== null || child.signalCode !== null) return done();
+      const timer = setTimeout(done, ms);
+      child.once('exit', () => {
+        clearTimeout(timer);
+        done();
+      });
+    });
   const close = async () => {
     await fetch(new URL('/api/exit', url), { method: 'POST' }).catch(() => {});
-    if (child.exitCode === null) {
-      await new Promise((done) => {
-        const timer = setTimeout(done, 5_000);
-        child.once('exit', () => {
-          clearTimeout(timer);
-          done(undefined);
-        });
-      });
-      // inbox-guard: own child (the CLI this test spawned, never an Inbox)
-      if (child.exitCode === null) child.kill('SIGTERM');
-    }
+    await exited(5_000);
+    // inbox-guard: own child (the CLI this test spawned, never an Inbox)
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+    // The folder is removed only once nothing is writing into it (an ENOTEMPTY otherwise).
+    await exited(5_000);
     await removeInboxScratch(root);
   };
   return { url, forge, close };
@@ -344,7 +349,7 @@ test('code review: a PR link in a changed Markdown file shows its card', async (
     const session = await start('review');
     try {
       const page = await open(browser, session.url, scheme, [['plannotator-markdown-view', 'read']]);
-      await page.getByText('doc.md', { exact: true }).first().click();
+      await page.locator('[data-review-sidebar] [data-item-type="file"][title$="doc.md"]').first().click();
       const link = page.locator('a[href="https://github.com/acme/widgets/pull/14"]').first();
       await expect(link).toBeVisible();
       await page.waitForTimeout(600);
@@ -449,7 +454,7 @@ test('code review: a long description shows about eight lines before it scrolls'
   const session = await start('review');
   try {
     const page = await open(browser, session.url, 'light', [['plannotator-markdown-view', 'read']]);
-    await page.getByText('doc.md', { exact: true }).first().click();
+    await page.locator('[data-review-sidebar] [data-item-type="file"][title$="doc.md"]').first().click();
     await page.locator('a[href="https://github.com/acme/widgets/issues/21"]').first().hover();
     const card = page.locator('[data-ref-card]');
     await expect(card).toContainText('Widget list jitters after a cold load');
@@ -473,7 +478,7 @@ test('code review in a short window: the header scrolls with the description and
     // 480: the card kept its footer but squeezed the description to a line. 400: the footer was cut off.
     for (const height of [480, 400]) {
       const page = await open(browser, session.url, 'light', [['plannotator-markdown-view', 'read']], height);
-      await page.getByText('doc.md', { exact: true }).first().click();
+      await page.locator('[data-review-sidebar] [data-item-type="file"][title$="doc.md"]').first().click();
       const link = page.locator('a[href="https://github.com/acme/widgets/pull/14"]').first();
       await link.evaluate((el) => el.scrollIntoView({ block: 'center' }));
       await page.waitForTimeout(300);

@@ -12,6 +12,7 @@
 import type { Annotation, Block, DocumentRenderAs, ImageAttachment } from '@plannotator/ui/types';
 import type { FeedbackDocuments } from '@plannotator/ui/hooks/useLinkedDoc';
 import {
+  codeDocumentBlocks,
   diagramDocumentBlocks,
   parseMarkdownToBlocks,
   BUNDLE_DOC_EXPORT_HEADING,
@@ -22,27 +23,35 @@ import {
   type MessageAnnotationEntry,
 } from '@plannotator/ui/utils/parser';
 import { parseAsciidocToBlocks } from '@plannotator/ui/utils/asciidocParser';
-import { documentRenderKindForPath, isDiagramRenderKind, shouldStripFrontmatter } from '@plannotator/shared/annotatable';
+import { codeDocumentLanguage, documentRenderKindForPath, isDiagramRenderKind, shouldStripFrontmatter } from '@plannotator/shared/annotatable';
 
 /**
  * Blocks for a document body rendered as `renderAs`: a diagram source
  * (.mmd/.dot) is ONE diagram block over its raw text, AsciiDoc goes through
- * the AsciiDoc parser, everything else is the markdown parse.
+ * the AsciiDoc parser, a config or data file (`code`) is ONE code block in the
+ * language its `path` names, everything else is the markdown parse.
  */
-export const blocksForRenderAs = (text: string, renderAs: DocumentRenderAs | undefined, frontmatter: boolean): Block[] => {
+export const blocksForRenderAs = (
+  text: string,
+  renderAs: DocumentRenderAs | undefined,
+  frontmatter: boolean,
+  path?: string | null,
+): Block[] => {
   if (isDiagramRenderKind(renderAs)) return diagramDocumentBlocks(text, renderAs);
   if (renderAs === 'asciidoc') return parseAsciidocToBlocks(text);
+  if (renderAs === 'code') return codeDocumentBlocks(text, codeDocumentLanguage(path));
   return parseMarkdownToBlocks(text, { frontmatter });
 };
 
 /** Blocks for a document identified by path, with that path's frontmatter rule. */
 export const blocksForDocument = (filepath: string, text: string): Block[] =>
-  blocksForRenderAs(text, documentRenderKindForPath(filepath) ?? 'markdown', shouldStripFrontmatter(filepath));
+  blocksForRenderAs(text, documentRenderKindForPath(filepath) ?? 'markdown', shouldStripFrontmatter(filepath), filepath);
 
 /**
  * Merge local annotations with SSE-delivered external ones, dropping
- * draft-restored copies of externals that SSE re-delivered (same source,
- * type and quote). The SSE version wins.
+ * draft-restored copies of externals that SSE re-delivered. A live update
+ * wins by ID. When IDs differ across sessions, the source, type, quote and
+ * comment text must match before dropping the restored copy.
  */
 export function mergeExternalAnnotations(local: Annotation[], external: Annotation[]): Annotation[] {
   if (external.length === 0) return local;
@@ -50,8 +59,12 @@ export function mergeExternalAnnotations(local: Annotation[], external: Annotati
     if (!a.source) return true;
     return !external.some((ext) =>
       ext.source === a.source &&
-      ext.type === a.type &&
-      ext.originalText === a.originalText
+      (ext.id === a.id || (
+        ext.type === a.type &&
+        ext.originalText === a.originalText &&
+        ext.text === a.text &&
+        ext.inReplyTo === a.inReplyTo
+      ))
     );
   });
   return [...kept, ...external];
@@ -100,7 +113,7 @@ export function resolveFeedbackSections(input: FeedbackSectionsInput): FeedbackS
     annotations = mergeExternalAnnotations(root.annotations, input.externalAnnotations);
     globalAttachments = root.globalAttachments;
     const markdown = root.markdown ?? '';
-    blocks = blocksForRenderAs(markdown, root.renderAs, shouldStripFrontmatter(input.sourceFilePath));
+    blocks = blocksForRenderAs(markdown, root.renderAs, shouldStripFrontmatter(input.sourceFilePath), input.sourceFilePath);
   }
 
   const order = input.bundleOrder ?? null;

@@ -22,7 +22,7 @@
  * {side,wide,wide-changed,full,changed,phone,phone-changed}[-copied]-{light,dark}.
  */
 
-import { devices, expect, test, type Browser, type BrowserContext, type Locator, type Page } from '@playwright/test';
+import { devices, expect, test, type Browser, type BrowserContext, type Locator, type Page } from './inbox-test';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -30,6 +30,7 @@ import { SimAgent, scratchProject } from '../../scripts/inbox-sim';
 import { NO_BROWSER } from '../helpers/no-browser';
 import { inboxScratch, removeInboxScratch } from './inbox-scratch';
 import { forgetFileViewChoice } from './file-view';
+import { clearSidebarPeek } from './sidebar-peek';
 
 const repo = resolve(__dirname, '../..');
 const builtBinary = resolve(process.env.PLANNOTATOR_E2E_BINARY ?? join(repo, '.local/plannotator'));
@@ -123,6 +124,7 @@ const row = (page: Page) => page.locator('[data-attachment-pane] [data-code-row]
 
 async function open(page: Page, name: string, view: 'full' | 'side' | null) {
   await page.goto(`${world.url}#thread=${world.threadId}&file=${world.ids[name]}${view ? `&view=${view}` : ''}`);
+  await clearSidebarPeek(page);
   await expect(page.locator(`[data-attachment-pane="${world.ids[name]}"]`)).toBeVisible();
 }
 
@@ -264,6 +266,7 @@ test('a wide window: Copy file leads the row side by side and in full screen; a 
       await open(page, 'manifest.yaml', 'full');
       // The same file was open a moment ago; a reload reads it again (a hash change alone does not).
       await page.reload();
+      await clearSidebarPeek(page);
       const note = page.locator('[data-full-view-changed]');
       await expect(note).toBeVisible();
       await expectClear(page, [note, page.locator('[data-full-view-bar]')]);
@@ -298,7 +301,7 @@ test('a changed file in full screen: the row starts below the changed note; the 
     await shot(page, 'changed');
     await pressAndRead(page, CHANGED, 'changed');
     // The version it sent: the clipboard gets that text.
-    await note.getByRole('button', { name: 'Open the version it sent' }).click();
+    await note.getByRole('button', { name: 'View sent version' }).click();
     await expect(page.locator('[data-attachment-pane]')).toHaveAttribute('data-version', 'sent');
     await expect(copyButton(page)).toHaveText('Copy file');
     await pressAndRead(page, MANIFEST);
@@ -325,6 +328,7 @@ test('on a phone: Copy file is a 44 px target at the top left, clear of the tool
     writeFileSync(join(world.project, 'slack', 'manifest.yaml'), CHANGED);
     try {
       await page.reload();
+      await clearSidebarPeek(page);
       const note = page.locator('[data-full-view-changed]');
       await expect(note).toBeVisible();
       await expectClear(page, [note, page.locator('[data-full-view-bar]')]);

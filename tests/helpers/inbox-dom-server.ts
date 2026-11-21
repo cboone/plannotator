@@ -19,9 +19,9 @@
  * while a test runs; the server answers `{ "sent": <message id> }` on stdout.
  * `{ "deliver": { session } }` is that session's connection delivering every
  * reply waiting for it (the bridge's `delivered`); the server answers
- * `{ "delivered": [<reply id>] }`. `{ "wait": { thread, session } }` is that
- * agent calling `wait_for_reply` on the thread through the Inbox's own MCP
- * (`/mcp`, a real MCP client); the server answers `{ "waited": <its
+ * `{ "delivered": [<reply id>] }`. `{ "read": { thread, session } }` is that
+ * agent calling `read_thread` on the thread through the Inbox's own MCP
+ * (`/mcp`, a real MCP client); the server answers `{ "read": <its
  * structured result> }`. The set-aside note's delay (also the 👍
  * Looks good Undo window) is a minute, so no note is written while a test
  * runs, unless `INBOX_DOM_SET_ASIDE_MS` names a shorter one.
@@ -51,7 +51,9 @@
  * (`{ thread, ids: { <name>: <attachment id> } }`).
  *
  * The Inbox is published over the tailnet by a scripted `tailscale`, and the
- * first line adds `tailnet: { listener, host, login }`: a request to that
+ * first line adds `tailnet: { listener, host, login }` (as with `bro-offer`:
+ * version 0.30.0, the Bro mode offer next, for heavy use, and `bro`, the id of
+ * a thread whose last agent message is long, its moment): a request to that
  * loopback port with that Host and login is one `tailscale serve` hands over.
  *
  * With `tags` (approval "inbox-tag-agents"), the mock's sample threads are
@@ -122,8 +124,13 @@
  * holds an agent's leaked tool-call text, as an Inbox older than the one-line
  * subject check kept it (tests/helpers/inbox-leaked-subject.ts); the world
  * adds `leaked` (that thread's id).
+ *
+ * With `accounts`, the PATH the Inbox reads usage on is `<data dir>/cswap-bin`
+ * and nothing else: a test writes a fake `cswap` there
+ * (tests/helpers/fake-cswap.ts). Without it that PATH is empty. Either way no
+ * real claude-swap can be reached.
  */
-import { appendFileSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { startInboxServer } from "../../packages/server/inbox";
@@ -135,6 +142,8 @@ import { createAgentEnvironmentFor } from "../../packages/server/inbox-agents";
 import { isScratchDataDir, refuseRealDataDir } from "./real-data-dir";
 import { seedTagWorld, TAG_SESSIONS } from "./inbox-tag-world";
 import { seedLeakedSubjects } from "./inbox-leaked-subject";
+import { InboxStore } from "../../packages/shared/inbox/store";
+import { parseInboxThreadPullRefs } from "../../packages/core/inbox-thread-pulls";
 import { markTourDecided } from "./tour-decided";
 
 const [dataDir, projectsDir, countArg, extra] = process.argv.slice(2);
@@ -237,7 +246,9 @@ const pairingProbes = {
  */
 const whatsNewMode = extra === "whats-new";
 if (whatsNewMode) {
-  writeUpdateState({ inboxVersion: "0.28.18" }, dataDir);
+  // WHATS_NEW_LATEST (a test's env): a newer release already known, so the Inbox offers an update next to the notes.
+  const newer = process.env.WHATS_NEW_LATEST;
+  writeUpdateState({ inboxVersion: "0.28.18", ...(newer ? { latestRelease: { tag: newer, fetchedAt: Date.now() } } : {}) }, dataDir);
   const releaseApi = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -253,10 +264,62 @@ if (whatsNewMode) {
 }
 const openInMode = extra === "open-in";
 const decisionsMode = extra === "decisions";
+/**
+ * With a fourth argument `pulls`: Code review is on, and each world's `waiting` thread lists one open PR of its own
+ * (`acme/web#<100 + i>`, the thread's own PR list), so its row offers Hide pull request. No forge is read: the test puts
+ * a `gh` that always fails first on PATH.
+ */
+const pullsMode = extra === "pulls";
+if (pullsMode) {
+  mkdirSync(dataDir, { recursive: true });
+  const file = join(dataDir, "config.json");
+  const config = existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>) : {};
+  writeFileSync(file, JSON.stringify({ ...config, inboxCodeReview: true }));
+}
 // Decision mode is experimental and off by default: this mode turns it on in the scratch config.json.
 if (decisionsMode) {
   mkdirSync(dataDir, { recursive: true });
   writeFileSync(join(dataDir, "config.json"), JSON.stringify({ experimental: { decisionMode: true } }));
+}
+// The Bro mode offer (approval "bro-mode"; its place in the line, approval "inbox-one-time-dialogs"): first use 3 days
+// ago, Snooze, the switches and the update-day dialogs behind the person, so only it can be next; heavy use (10 threads
+// read, on 2 days), seeded before the Inbox opens the store; and one thread whose last agent message is long (its moment).
+const broOfferMode = extra === "bro-offer";
+let broThread: string | null = null;
+if (broOfferMode) {
+  mkdirSync(dataDir, { recursive: true });
+  const day = 24 * 3_600_000;
+  const settled = new Date(Date.now() - 3 * day).toISOString();
+  writeFileSync(
+    join(dataDir, "config.json"),
+    JSON.stringify({
+      updateCheck: false,
+      inboxBoard: false,
+      inboxSteps: false,
+      inboxCodeReview: false,
+      inboxSnoozeIntro: { firstUseAt: settled, snoozedAt: settled },
+      inboxSound: { dialogShownFor: "0.30.0" },
+      inboxListIntro: { shownAt: settled, version: 2 },
+      inboxVoiceIntro: { shownAt: settled },
+      // The tab icon dialog (an update-day dialog): settled by a favicon already chosen.
+      favicon: "glass",
+      // Personal agents (after Snooze in the line): settled by OpenClaw's Inbox tool turned on.
+      inboxTool: { openclaw: true },
+      // Priority (after Snooze in the line): settled by a thread once added to Priority.
+      inboxPriorityIntro: { usedAt: settled },
+    }),
+  );
+  let clock = new Date();
+  const seed = InboxStore.open(dataDir, { now: () => clock });
+  mkdirSync(join(projectsDir, "reading"), { recursive: true });
+  const project = seed.ensureProject({ name: "reading", root: join(projectsDir, "reading") });
+  for (let i = 0; i < 10; i++) {
+    clock = new Date(Date.now() - (i % 2 === 0 ? 1 : 2) * day);
+    const long = i === 9 ? ` ${Array.from({ length: 160 }, (_, w) => `word${w}`).join(" ")}` : "";
+    const thread = seed.sendMessage({ project_id: project.id, author: { kind: "agent", host: "claude-code", session: `ses_read${i}`, name: "Claude Code" }, body: `Update ${i}.${long}` }).message;
+    seed.markSeen(thread.id);
+    if (i === 9) broThread = thread.id;
+  }
 }
 const reloadHostsMode = extra === "reload-hosts";
 const restartMode = extra === "restart" || reloadHostsMode;
@@ -305,6 +368,20 @@ const leakedIds =
         }),
       )
     : [];
+// The one-time "themes" dialog is settled in every world (as for someone on another theme): on a release version it is
+// due from day one and would be the line's next dialog, ahead of the one a test is about. The warning before a Mark
+// read that sets questions aside is off too (as for someone who ticked "Don't show this again"), so a test about Mark
+// read itself is not stopped by it; the warning's own test turns it on (POST /api/inbox/settings `mark_read_warning`).
+{
+  mkdirSync(dataDir, { recursive: true });
+  const file = join(dataDir, "config.json");
+  const config = existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>) : {};
+  const settled = {
+    ...(config.inboxThemeChooser === undefined ? { inboxThemeChooser: { notNeededAt: "2026-10-01T10:00:00.000Z" } } : {}),
+    ...(config.inboxMarkReadWarning === undefined ? { inboxMarkReadWarning: false } : {}),
+  };
+  if (Object.keys(settled).length > 0) writeFileSync(file, JSON.stringify({ ...config, ...settled }));
+}
 const server = await startInboxServer({
   dataDir,
   setAsideDelayMs: Number(process.env.INBOX_DOM_SET_ASIDE_MS) > 0 ? Number(process.env.INBOX_DOM_SET_ASIDE_MS) : 60_000,
@@ -312,6 +389,10 @@ const server = await startInboxServer({
   ...(phonesMode ? { tailscale, pairingProbes } : {}),
   ...(openInMode ? { openInLauncher, tailscale, publishTailnet: true } : {}),
   ...(whatsNewMode ? { version: "0.28.19", binaryPath: null } : {}),
+  ...(broOfferMode ? { version: "0.30.0", binaryPath: null, tailscale, publishTailnet: true } : {}),
+  // Every window reads usage when it opens: only `accounts` finds a `cswap`, and never on this process's own PATH, which can hold a real one.
+  // No kept answer: the tests change the fake between reads.
+  accounts: { environment: createAgentEnvironmentFor({ platform: process.platform, homeDir: scratchHome, env: { HOME: scratchHome, PATH: extra === "accounts" ? join(dataDir, "cswap-bin") : "" } }), cacheMs: 0 },
   ...(restartMode
     ? {
         version: "0.28.25",
@@ -436,6 +517,11 @@ for (let i = 0; i < (firstRunMode ? 0 : count); i++) {
   }
   const stopped = store.sendMessage({ project_id: project.id, author, body: STOPPED }).message;
   const waiting = store.sendMessage({ project_id: project.id, author: { ...author, session: `ses_b${i}` }, body: WAITING }).message;
+  if (pullsMode) {
+    const parsed = parseInboxThreadPullRefs([`acme/web#${100 + i}`], "add");
+    if ("error" in parsed) throw new Error(parsed.error);
+    store.changeThreadPulls({ thread_id: waiting.id, add: parsed.refs, by: { kind: "agent", host: "claude-code", session: `ses_b${i}`, name: "Claude Code" } });
+  }
   // One thread two sessions write in: A asks, then B posts a later update in it.
   const asking = store.sendMessage({ project_id: project.id, author: { ...author, session: `ses_m${i}` }, body: WAITING.replace("docs site", "admin site") }).message;
   const update = store.sendMessage({ project_id: project.id, author: { ...author, session: `ses_n${i}`, name: "Codex", host: "codex" }, body: "Update: the admin index builds now.", reply_to: asking.id }).message;
@@ -673,10 +759,10 @@ for (let i = 0; i < (firstRunMode ? 0 : count); i++) {
       : [],
   });
 }
-const tailnet = openInMode ? { listener: server.tailscale.listenerPort(), host: `macbook.tail0000.ts.net:${server.port}`, login: "ramos@example.com" } : undefined;
+const tailnet = openInMode || broOfferMode ? { listener: server.tailscale.listenerPort(), host: `macbook.tail0000.ts.net:${server.port}`, login: "ramos@example.com" } : undefined;
 const tagWorld = extra === "tags" ? await seedTagWorld(`http://127.0.0.1:${server.port}`, server.token, join(projectsDir, "tags")) : null;
 const tags = tagWorld ? { ids: tagWorld.ids, sessions: TAG_SESSIONS } : undefined;
-process.stdout.write(`${JSON.stringify({ port: server.port, worlds, ...(tailnet ? { tailnet } : {}), ...(tags ? { tags } : {}) })}\n`);
+process.stdout.write(`${JSON.stringify({ port: server.port, worlds, ...(tailnet ? { tailnet } : {}), ...(tags ? { tags } : {}), ...(broThread ? { bro: broThread } : {}) })}\n`);
 /** The host a delivery is recorded under: the tag world's own sessions are not all Claude Code. */
 function tagHost(session: string): string {
   if (session === TAG_SESSIONS.pi || session === TAG_SESSIONS.oldPi) return "pi";
@@ -689,7 +775,7 @@ void (async () => {
     const command = JSON.parse(line) as {
       send?: { project: string; session: string; body: string; reply_to?: string; supersedes?: string[]; host?: string };
       deliver?: { session: string };
-      wait?: { thread: string; session: string };
+      read?: { thread: string; session: string };
       poll?: { session: string; body: Record<string, unknown> };
       first?: { root: string; session: string; body: string };
       card?: { project: string; session: string; title: string; say?: string; thread?: string };
@@ -725,14 +811,14 @@ void (async () => {
       process.stdout.write(`${JSON.stringify({ carded: made.card.id })}\n`);
       continue;
     }
-    if (command.wait) {
+    if (command.read) {
       const client = new Client({ name: "inbox-dom-server", version: "1.0.0" });
       await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${server.port}/mcp`)));
-      const result = (await client.callTool({ name: "wait_for_reply", arguments: { thread_id: command.wait.thread, agent_session: command.wait.session, timeout_seconds: 5 } })) as {
+      const result = (await client.callTool({ name: "read_thread", arguments: { thread_id: command.read.thread, agent_session: command.read.session, format: "full" } })) as {
         structuredContent?: unknown;
       };
       await client.close();
-      process.stdout.write(`${JSON.stringify({ waited: result.structuredContent ?? null })}\n`);
+      process.stdout.write(`${JSON.stringify({ read: result.structuredContent ?? null })}\n`);
       continue;
     }
     if (command.deliver) {

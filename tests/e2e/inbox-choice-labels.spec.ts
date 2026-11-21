@@ -16,7 +16,7 @@
  * PLANNOTATOR_E2E_PROOF_DIR/choice-labels).
  */
 
-import { expect, test, devices, type Browser, type BrowserContext, type Page } from '@playwright/test';
+import { expect, test, devices, type Browser, type BrowserContext, type Page } from './inbox-test';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -62,6 +62,14 @@ const LATEST = [
   '',
   '- [ ] [Beta list](forecast-15.html)',
   '- [ ] `everyone`',
+  ':::',
+  '',
+  // Left open: the open questions button shows only while a question is unanswered (approval "reply-bar-pairs").
+  ':::question',
+  'Send it on a Monday?',
+  '',
+  '- [ ] Yes',
+  '- [ ] No',
   ':::',
 ].join('\n');
 
@@ -113,6 +121,7 @@ test.beforeAll(async ({ browser }: { browser: Browser }) => {
   const env = {
     PATH: `${trap}:${process.env.PATH ?? ''}`,
     HOME: root,
+    PLANNOTATOR_RELAY_URL: 'http://127.0.0.1:9',
     PLANNOTATOR_DATA_DIR: join(root, 'data'),
     PLANNOTATOR_BROWSER: NO_BROWSER,
     PLANNOTATOR_INBOX_CONNECT: '0',

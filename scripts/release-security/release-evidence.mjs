@@ -21,12 +21,16 @@ export const NPM_SUBJECTS = [
   "npm-packages/plannotator-opencode.tgz",
   "npm-packages/plannotator-pi-extension.tgz",
   "npm-packages/plannotator-dsh.tgz",
+  "npm-packages/plannotator-cline.tgz",
+  "npm-packages/plannotator-openclaw.tgz",
 ];
 
 export const RELEASE_WORKSPACES = [
   "",
+  "apps/cline-plugin",
   "apps/dsh-plugin",
   "apps/hook",
+  "apps/openclaw-plugin",
   "apps/opencode-plugin",
   "apps/paste-service",
   "apps/pi-extension",

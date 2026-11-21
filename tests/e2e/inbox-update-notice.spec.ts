@@ -14,7 +14,7 @@
  * Needs the built apps (apps/hook/dist), as the other specs do.
  */
 
-import { expect, test } from '@playwright/test';
+import { expect, test } from './inbox-test';
 import { execSync, spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, realpathSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
@@ -67,6 +67,8 @@ test.beforeAll(async () => {
       HOME: home,
       TMPDIR: tmpdir(),
       PLANNOTATOR_DATA_DIR: dataDir,
+      // A release version: never the live daily ping (packages/shared/daily-ping.ts).
+      NO_ANON_PING: '1',
       PLANNOTATOR_BROWSER: NO_BROWSER,
       NO_BROWSER,
       PLANNOTATOR_RELAY_URL: 'http://127.0.0.1:9',

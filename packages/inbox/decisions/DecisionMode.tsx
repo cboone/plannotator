@@ -24,6 +24,7 @@ import { replyKeysToRenew, type SendTarget, type SentContents } from '../sendTar
 import { agentName, formatCount } from '../format';
 import { HostMark, Icon } from '../icons';
 import { prefersReducedMotion } from '../settle';
+import { registerReloadFlush } from '../stalePage';
 import { Tip } from '../components/Tip';
 import { DecisionCard, type CardPicture, type CardWords } from './DecisionCard';
 import {
@@ -60,6 +61,7 @@ import {
   type QueueState,
   type SessionChip,
 } from './model';
+import { newUuid } from '../uuid';
 
 export { DECISION_HOLD_MS } from './model';
 /**
@@ -219,6 +221,19 @@ export function DecisionMode(props: DecisionModeProps) {
   const unsavedWordsRef = useRef<(() => boolean) | null>(null);
   /** The `startNonce` already applied (each start moves to its card once). */
   const appliedStart = useRef<number | null>(null);
+  // The stale page notice's Reload (stalePage.ts) waits for the picks on their way; words typed on the card and not
+  // yet given as an answer would be lost, so they stop it.
+  useEffect(
+    () =>
+      registerReloadFlush(async () => {
+        for (let seen = pickChain.current; ; seen = pickChain.current) {
+          await seen;
+          if (seen === pickChain.current) break;
+        }
+        return !(unsavedWordsRef.current?.() ?? false);
+      }),
+    [],
+  );
   const [, setTick] = useState(0);
   const escapedAt = useRef(0);
   const [touch, setTouch] = useState(false);
@@ -514,7 +529,7 @@ export function DecisionMode(props: DecisionModeProps) {
         const last = sendContents.current.get(keyId);
         // A replay of a key answers the reply it wrote: a changed answer (a new revision) takes a new key.
         const renew = !sendKeys.current.has(keyId) || (last !== undefined && replyKeysToRenew(new Map([[keyId, last]]), new Map([[keyId, contents]])).length > 0);
-        if (renew) sendKeys.current.set(keyId, crypto.randomUUID());
+        if (renew) sendKeys.current.set(keyId, newUuid());
         sendContents.current.set(keyId, contents);
         const result = await inboxApi.reply(target.message.id, {
           idempotency_key: sendKeys.current.get(keyId)!,
@@ -1018,7 +1033,11 @@ export function DecisionMode(props: DecisionModeProps) {
           <ImageLightbox
             src={lightbox.pictures[lightbox.index]!.src}
             alt={lightbox.pictures[lightbox.index]!.name}
-            images={lightbox.pictures.length > 1 ? lightbox.pictures.map((p) => ({ src: p.src, alt: p.name })) : undefined}
+            // Each picture by its choice ("B · Quiet hover menu"), not its file's route; a finger swipes through them (approval "inbox-image-swipe").
+            images={lightbox.pictures.length > 1 ? lightbox.pictures.map((p) => ({ src: p.src, alt: p.alt ?? p.name, name: p.name })) : undefined}
+            swipe
+            // The place opened, not the first picture with that URL: a picture two choices share opens as the one zoomed.
+            at={lightbox.index}
             onClose={() => setLightbox(null)}
           />,
           dialogRef.current ?? document.body,

@@ -166,11 +166,12 @@ export function ReaderApp({ init }: { init: ReaderInit }) {
   // The token under the pointer, for F12 / Shift+F12 (as in an editor).
   const pointedRef = useRef<DiffPosition | null>(null);
   const onTokenHoverEnter = useCallback(
-    (props: DiffTokenEventBaseProps, filePath: string) => {
+    (props: DiffTokenEventBaseProps, filePath: string): boolean => {
       const request = buildTokenHoverRequest(props, filePath);
-      if (!request) return;
+      if (!request) return false;
       pointedRef.current = positionOf(request);
       hover.onTokenHoverEnter({ ...request, symbol: `${request.symbol}${POSITION_MARK}${request.line}:${request.charStart}` }, props.tokenElement);
+      return true;
     },
     [hover.onTokenHoverEnter],
   );
@@ -291,6 +292,13 @@ export function ReaderApp({ init }: { init: ReaderInit }) {
       onRevealFile: reveal,
       renderFileActions: (file) => <FileActions file={file} />,
       renderOverviewDiagram: (diagram) =>
+        diagram.kind === "mermaid" ? (
+          <Suspense fallback={<pre className="overflow-x-auto whitespace-pre rounded-md bg-muted/50 p-3 font-mono text-[11px] text-muted-foreground">{diagram.source}</pre>}>
+            <OverviewDiagram source={diagram.source} onChapter={scrollToChapter} />
+          </Suspense>
+        ) : null,
+      // A chapter's Mermaid diagram, drawn like the overview's (each render takes its own drawing id).
+      renderChapterDiagram: (diagram) =>
         diagram.kind === "mermaid" ? (
           <Suspense fallback={<pre className="overflow-x-auto whitespace-pre rounded-md bg-muted/50 p-3 font-mono text-[11px] text-muted-foreground">{diagram.source}</pre>}>
             <OverviewDiagram source={diagram.source} onChapter={scrollToChapter} />

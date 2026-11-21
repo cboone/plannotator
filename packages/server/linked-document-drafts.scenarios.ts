@@ -125,19 +125,26 @@ export function defineLinkedDocumentDraftScenarios(runtime: string, start: Linke
       await server.stop();
     }
 
-    const post = (server: LinkedDraftServer, path: string, body: unknown) =>
+    const post = (server: LinkedDraftServer, path: string, body: unknown, headers: Record<string, string> = {}) =>
       fetch(`${server.url}${path}`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...headers },
         body: JSON.stringify(body),
       });
 
-    const saveDocuments = (server: LinkedDraftServer, documents: { path: string; annotations: unknown[] }[]) =>
-      post(server, "/api/draft/document", { documents });
+    const saveDocuments = (
+      server: LinkedDraftServer,
+      documents: { path: string; annotations: unknown[] }[],
+      headers: Record<string, string> = {},
+    ) => post(server, "/api/draft/document", { documents }, headers);
+
+    // A reader that keeps the session's roots (#2291): a tab on this machine
+    // may keep copies of documents anywhere, as /api/doc serves it them.
+    const FORWARDED = { "X-Forwarded-For": "192.0.2.10" };
 
     const loadDraft = async (server: LinkedDraftServer): Promise<{ status: number; body: LoadedDraft }> => {
       const res = await fetch(`${server.url}/api/draft`);
-      return { status: res.status, body: (await res.json()) as LoadedDraft };
+      return { status: res.status, body: (res.status === 204 ? {} : await res.json()) as LoadedDraft };
     };
 
     test("plan review advertises per-document copies", async () => {
@@ -192,7 +199,7 @@ export function defineLinkedDocumentDraftScenarios(runtime: string, start: Linke
       expect(body).toEqual(JSON.parse(JSON.stringify(stored)));
 
       const empty = await openPlan(planText());
-      expect((await loadDraft(empty)).status).toBe(404);
+      expect((await loadDraft(empty)).status).toBe(204);
     });
 
     test("a document read back is offered on the next reload", async () => {
@@ -239,10 +246,36 @@ export function defineLinkedDocumentDraftScenarios(runtime: string, start: Linke
         await close(server);
 
         const reopened = await openPlan(plan);
-        expect((await loadDraft(reopened)).status).toBe(404);
+        expect((await loadDraft(reopened)).status).toBe(204);
         for (const path of [design, notes]) {
           expect((await fetch(`${reopened.url}/api/draft/document?path=${encodeURIComponent(path)}`)).status).toBe(404);
         }
+      });
+
+      test(`${name} from a reloaded page clears only that page's copies`, async () => {
+        const plan = planText();
+        const server = await openPlan(plan);
+        // An earlier page load commented on both documents.
+        await post(server, "/api/draft/document?client=page-1", {
+          documents: [
+            { path: design, annotations: [comment("on-design")] },
+            { path: notes, annotations: [comment("on-notes")] },
+          ],
+        });
+        // The reloaded page is offered both, and restores only the design.
+        expect((await loadDraft(server)).body.documents?.map((d) => d.path).sort()).toEqual([design, notes].sort());
+        const claim = await fetch(`${server.url}/api/draft/document?path=${encodeURIComponent(design)}&client=page-2`);
+        expect(claim.status).toBe(200);
+        expect((await post(server, `${decision.path}?client=page-2`, decision.body)).status).toBe(200);
+        await close(server);
+
+        // The restored copy was sent and is gone; the unrestored one was not
+        // sent, so it is offered again.
+        const reopened = await openPlan(plan);
+        expect((await fetch(`${reopened.url}/api/draft/document?path=${encodeURIComponent(design)}`)).status).toBe(404);
+        expect((await loadDraft(reopened)).body.documents?.map((d) => [d.path, idsOf(d.annotations)])).toEqual([
+          [notes, ["on-notes"]],
+        ]);
       });
     }
 
@@ -332,7 +365,7 @@ export function defineLinkedDocumentDraftScenarios(runtime: string, start: Linke
           headers: { "Sec-Fetch-Site": "cross-site" },
         });
         expect(read.status).toBe(403);
-        expect((await loadDraft(second)).status).toBe(404);
+        expect((await loadDraft(second)).status).toBe(204);
         expect(second.unsent()).toBe(0);
       });
     }
@@ -357,11 +390,11 @@ export function defineLinkedDocumentDraftScenarios(runtime: string, start: Linke
 
         const traversal = `${plans}/../outside.md`;
         const refused = [sibling, linkOut, traversal, outside, "beside.md"];
-        const res = await saveDocuments(server, [beside, ...refused].map((path) => ({ path, annotations: [comment("c")] })));
+        const res = await saveDocuments(server, [beside, ...refused].map((path) => ({ path, annotations: [comment("c")] })), FORWARDED);
         expect(res.status).toBe(200);
         expect((await res.json()).rejected).toEqual(refused);
 
-        const read = (path: string) => fetch(`${server.url}/api/draft/document?path=${encodeURIComponent(path)}`);
+        const read = (path: string) => fetch(`${server.url}/api/draft/document?path=${encodeURIComponent(path)}`, { headers: FORWARDED });
         expect((await read(beside)).status).toBe(200);
         for (const path of [sibling, linkOut, traversal, outside]) expect((await read(path)).status).toBe(403);
         expect((await read("beside.md")).status).toBe(400);
@@ -376,10 +409,10 @@ export function defineLinkedDocumentDraftScenarios(runtime: string, start: Linke
       const res = await saveDocuments(server, [
         { path: outside, annotations: [comment("outside")] },
         { path: design, annotations: [comment("inside")] },
-      ]);
+      ], FORWARDED);
       expect(res.status).toBe(200);
       expect((await res.json()).rejected).toEqual([outside]);
-      expect((await fetch(`${server.url}/api/draft/document?path=${encodeURIComponent(outside)}`)).status).toBe(403);
+      expect((await fetch(`${server.url}/api/draft/document?path=${encodeURIComponent(outside)}`, { headers: FORWARDED })).status).toBe(403);
       expect((await loadDraft(server)).body.documents?.map((d) => d.path)).toEqual([design]);
     });
 

@@ -18,7 +18,7 @@
  * or in PLANNOTATOR_TAG_SHOTS when it names a folder.
  */
 
-import { expect, test, type Browser, type BrowserContext, type Page } from '@playwright/test';
+import { expect, test, type Browser, type BrowserContext, type Page } from './inbox-test';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -80,7 +80,7 @@ async function openReply(page: Page, threadId: string): Promise<ReturnType<Page[
   // itself once read (approval "inbox-reply-drafts"); the read can land between the check and
   // the click, so a click that finds no Reply is tried again. The test starts from an empty box.
   const box = pane.getByRole('textbox', { name: /^Reply to/ });
-  const reply = pane.locator('.ib-pfoot').getByRole('button', { name: /^(Reply|Edit draft)$/ });
+  const reply = pane.locator('.ib-pfoot').getByRole('button', { name: /^Reply$|Edit draft$/ });
   for (let attempt = 0; attempt < 10 && !(await box.isVisible()); attempt += 1) {
     await reply.click({ timeout: 1_000 }).catch(() => {});
   }
@@ -119,6 +119,7 @@ test.beforeAll(async ({ browser }: { browser: Browser }) => {
   const env = {
     PATH: process.env.PATH ?? '',
     HOME: root,
+    PLANNOTATOR_RELAY_URL: 'http://127.0.0.1:9',
     PLANNOTATOR_DATA_DIR: dataDir,
     PLANNOTATOR_BROWSER: NO_BROWSER,
     NO_BROWSER,
@@ -307,7 +308,7 @@ test('a tag in a file comment: the composer offers agents with "Goes to" and the
   const { page } = world;
   await fileCommentTaggingPi(page);
   await shot(page, '4-file-comment-desktop');
-  await page.getByRole('button', { name: 'Save' }).click();
+  await page.locator('[data-comment-popover]').getByRole('button', { name: 'Comment', exact: true }).click();
   await page.getByRole('button', { name: 'Reply', exact: true }).first().click();
   const reply = page.getByRole('textbox', { name: /^Reply to/ });
   await reply.fill('See my comment on the design.');
@@ -346,15 +347,18 @@ test('the sent reply shows one line per agent (Lines): delivered, queued with it
   await expect(page.locator('.ib-lbody [data-thread-id="' + world.tags.ids.t2 + '"]').first()).toContainText('1 of 3 delivered · Pi queued');
 });
 
-test('the thread head and the row show the agents in the thread, overlapping', async () => {
+test('the thread head shows the agents in the thread overlapping, the row beside its project', async () => {
   const { page } = world;
   await page.goto(`${world.url}#thread=${world.tags.ids.t3}`);
   const head = page.locator('[data-thread-participants]');
-  await expect(head).toHaveText('Claude Code and Pi');
-  await expect(head.locator('[data-tag-stack]')).toHaveAttribute('data-tag-stack', '2');
+  // Two sessions: a Claude Code mark, a Pi mark and "2 sessions" (inbox-thread-sessions.spec.ts opens it).
+  await expect(head).toHaveText('2 sessions');
+  await expect(head).toHaveAttribute('data-thread-sessions', '2');
+  await expect(head.locator('[data-pile]')).toHaveAttribute('data-pile', '2');
   await shot(page, '6-thread-head-desktop', { clip: { selector: '.ib-pbody > .ib-tmeta[data-thread-meta]', pad: 40 } });
   const row = page.locator(`.ib-lbody [data-thread-id="${world.tags.ids.t3}"]`).first();
-  await expect(row.locator('[data-tag-stack]')).toHaveAttribute('data-tag-stack', '2');
+  await expect(row.locator('[data-row-agents]')).toHaveAttribute('data-row-agents', '2');
+  await expect(row.locator('[data-row-agents]')).toHaveAttribute('aria-label', 'Claude Code and Pi');
   await shot(page, '7-list-row-desktop', { clip: { selector: `.ib-lbody [data-thread-id="${world.tags.ids.t2}"]`, pad: 24 } });
   await shot(page, '7-list-desktop');
 });

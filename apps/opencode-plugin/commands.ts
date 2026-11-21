@@ -53,13 +53,14 @@ import path from "path";
 import { resolveValidatedTargetAgent } from "./agent-switch";
 import { deliverOpenCodePrompt } from "./prompt-delivery-error";
 import { announceSessionUrl } from "./session-url";
+import { scheduleOpenCodeDailyPing } from "./daily-ping";
 import { decideListed } from "./session-registry";
 import {
   readLastUserAgent,
-  readMessageAgent,
   resolveAddressableAgent,
   resolveAnnotatedMessageAgent,
 } from "./message-agent";
+import { pickRecentAssistantMessages } from "./recent-messages";
 
 /** Shared dependencies injected by the plugin */
 export interface CommandDeps {
@@ -277,6 +278,8 @@ export async function handleReviewCommand(
   const sessionId = event.properties?.sessionID;
 
   const startServer = deps.startReviewServer ?? startReviewServer;
+  // The daily ping (daily-ping.ts): in the background, never awaited.
+  scheduleOpenCodeDailyPing("review");
   const reviewProject = (await detectProjectName(reviewDirectory ? reviewCwd : undefined)) ?? undefined;
   const server = await startServer({
     rawPatch,
@@ -366,6 +369,7 @@ export async function handleAnnotateCommand(
 ) {
   const { client, htmlContent, getSharingEnabled, getShareBaseUrl, getPasteApiUrl, directory } = deps;
   const startServer = deps.startAnnotateServer ?? startAnnotateServer;
+  scheduleOpenCodeDailyPing("annotate");
 
   // @ts-ignore - Event properties contain arguments
   const rawArgs = event.properties?.arguments || event.arguments || "";
@@ -635,6 +639,7 @@ export async function handleAnnotateLastCommand(
 ): Promise<{ approved: boolean; feedback: string; agent?: string } | null> {
   const { client, htmlContent, getSharingEnabled, getShareBaseUrl, getPasteApiUrl, directory } = deps;
   const startServer = deps.startAnnotateServer ?? startAnnotateServer;
+  scheduleOpenCodeDailyPing("last");
 
   // @ts-ignore - Event properties contain arguments
   const rawArgs = event.properties?.arguments || event.arguments || "";
@@ -654,28 +659,11 @@ export async function handleAnnotateLastCommand(
   });
   const messages = messagesResponse.data;
 
-  const RECENT_LIMIT = 25;
-  const recentMessages: { messageId: string; text: string; timestamp?: string }[] = [];
+  const picked = pickRecentAssistantMessages(messages);
+  const recentMessages = picked.map(({ agent: _agent, ...message }) => message);
   // Who wrote each candidate message (#1612), kept beside the payload rather
   // than in it: the annotate server has no use for it.
-  const messageAgents: { messageId: string; agent?: string }[] = [];
-  if (messages) {
-    for (let i = messages.length - 1; i >= 0 && recentMessages.length < RECENT_LIMIT; i--) {
-      const msg = messages[i];
-      if (msg.info.role !== "assistant") continue;
-      const textParts = msg.parts
-        .filter((p: any) => p.type === "text" && p.text?.trim())
-        .map((p: any) => p.text);
-      if (textParts.length === 0) continue;
-      const messageId = msg.info.id ?? `opencode-${i}`;
-      recentMessages.push({
-        messageId,
-        text: textParts.join("\n"),
-        timestamp: msg.info.time?.created ? new Date(msg.info.time.created).toISOString() : undefined,
-      });
-      messageAgents.push({ messageId, agent: readMessageAgent(msg.info) });
-    }
-  }
+  const messageAgents = picked.map(({ messageId, agent }) => ({ messageId, agent }));
 
   const lastText = recentMessages[0]?.text ?? null;
   if (!lastText) {

@@ -88,16 +88,25 @@ function render(filtered: boolean, narrow = false): HTMLElement {
   return host;
 }
 
-/** A phone row's lines: line 1, the subject's line, and the line under it (`chips`, the agent's mark as 'mark'). */
-function lines(el: HTMLElement, id: string): { l1: string[]; subject: string; chips: string[] } {
+/**
+ * A phone row's three lines (approval "inbox-list-row-v2"): line 1 in reading order (the project's text, the
+ * agents' tiles by their name as `agents:<name>`, which CSS draws before the project, the time as `time`), the
+ * title, and line 3 (the preview by its text, the open count
+ * as `?N`, `?N:stop` or `?N:hold` when filled, anything else by its text), or `null` when the row has no line 3.
+ */
+function lines(el: HTMLElement, id: string): { l1: string[]; title: string; l3: string[] | null } {
   const r = el.querySelector<HTMLElement>(`.ib-mrow[data-thread-id="${id}"]`);
   expect(r).not.toBeNull();
   const [m1, m2, m3, ...rest] = [...r!.children].filter((c) => !c.classList.contains('ib-sr')) as HTMLElement[];
   expect([m1!.className, m2!.className, m3!.className]).toEqual(['ib-m1', 'ib-m2', 'ib-m3']);
   expect(rest).toEqual([]);
-  const named = (c: Element) => (c.className === 'ib-mcol' ? 'mark' : c.textContent ?? '');
-  const l1 = [...m1!.children].map((c) => (c.className === 'ib-mcol' ? 'mark' : `${c.className}:${c.textContent}`));
-  return { l1, subject: m2!.textContent ?? '', chips: [...m3!.children].map(named) };
+  const from = m1!.querySelector(':scope > .ib-from')!;
+  const l1 = [
+    ...[...from.children].map((c) => (c.getAttribute('role') === 'img' ? `agents:${c.getAttribute('aria-label')}` : c.textContent ?? '')),
+    ...[...m1!.children].filter((c) => c !== from).map((c) => (c.classList.contains('ib-t') ? 'time' : c.className)),
+  ];
+  const named = (c: Element) => (c.classList.contains('ib-qn') ? `?${c.getAttribute('data-open-count')}${c.getAttribute('data-wait-step') === 'open' ? '' : `:${c.getAttribute('data-wait-step')}`}` : c.textContent ?? '');
+  return { l1, title: m2!.textContent ?? '', l3: m3!.children.length ? [...m3!.children].map(named) : null };
 }
 
 describe.if(hasDom)('the list on a phone', () => {
@@ -111,27 +120,33 @@ describe.if(hasDom)('the list on a phone', () => {
     }
   });
 
-  test('where and when on the first line, the subject on its own line, then a line led by the badge and the mark', () => {
+  test('three lines: the agents, the project and when; the title; then the preview and the question mark at its end', () => {
     const el = render(false);
+    // An unnamed thread: its subject is the title, and line 3 holds ?N alone, filled as the row is stopped.
     expect(lines(el, 'msg_stop')).toEqual({
-      // Line 1 is the project and the time only; the agent's mark leads line 3, after the badge (approval "inbox-row-mark-left").
-      l1: ['ib-p:payments-reconciliation-service-v2', expect.stringMatching(/^ib-t:/)],
-      subject: 'Subject msg_stop',
-      chips: ['Stopped', 'mark', '2 questions'],
+      l1: ['payments-reconciliation-service-v2', 'agents:Claude Code', 'time'],
+      title: 'Subject msg_stop',
+      l3: ['?2:stop'],
     });
-    // No badge: the mark starts the line; the long thread name and the guided review mark ride it, the count ends it; nothing shares the subject's line.
-    expect(lines(el, 'msg_wait').chips).toEqual(['mark', 'refund-webhooks-and-the-long-running-reconciliation-job', 'Guided review', '2 questions']);
-    // A Sent row says where the reply is; its agent's mark still leads the line under it.
+    // A named thread: the name is the title, whole however long; the subject is the preview, then the guided review book.
+    expect(lines(el, 'msg_wait')).toEqual({
+      l1: ['payments-reconciliation-service-v2', 'agents:Claude Code', 'time'],
+      title: 'refund-webhooks-and-the-long-running-reconciliation-job',
+      l3: ['Subject msg_wait', '', '?2'],
+    });
+    expect(el.querySelector('.ib-mrow[data-thread-id="msg_wait"] .ib-m3 > [data-guide-mark]')!.getAttribute('aria-label')).toBe('Guided review');
+    // A Sent row says where the reply is, as its title; nothing else waits, so no line 3.
     expect(lines(el, 'msg_sent')).toEqual({
-      l1: ['ib-p:payments-reconciliation-service-v2', expect.stringMatching(/^ib-t:/)],
-      subject: 'Saved for Pi. It sees it when it next reads this thread.',
-      chips: ['mark'],
+      l1: ['payments-reconciliation-service-v2', 'agents:Pi', 'time'],
+      title: 'Saved for Pi. It sees it when it next reads this thread.',
+      l3: null,
     });
   });
 
-  test("one project's list names the agent where the project was", () => {
+  test("one project's list: the agents' tiles alone where the project was, no name in words", () => {
     const el = render(true);
-    expect(lines(el, 'msg_stop').l1[0]).toBe('ib-p:Claude Code');
-    expect(lines(el, 'msg_sent').l1[0]).toBe('ib-p:Pi');
+    expect(lines(el, 'msg_stop').l1).toEqual(['agents:Claude Code', 'time']);
+    expect(lines(el, 'msg_sent').l1).toEqual(['agents:Pi', 'time']);
+    expect(el.querySelector('.ib-mrow[data-thread-id="msg_stop"] .ib-m1')!.textContent).not.toContain('Claude Code');
   });
 });

@@ -24,7 +24,7 @@
  * PLANNOTATOR_E2E_PROOF_DIR/tidy).
  */
 
-import { devices, expect, test, type Browser, type BrowserContext, type Page } from '@playwright/test';
+import { devices, expect, test, type Browser, type BrowserContext, type Page } from './inbox-test';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -32,7 +32,7 @@ import { INBOX_BRIDGE_EVENT_PATH, INBOX_BRIDGE_POLL_PATH, inboxWakeText, parseIn
 import { InboxStore } from '../../packages/shared/inbox/store';
 import { INBOX_TIDY_INSTRUCTION } from '../../packages/core/inbox-tidy';
 import { SimAgent, scratchProject } from '../../scripts/inbox-sim';
-import { inboxScratch, rememberInboxOf, removeInboxScratch } from './inbox-scratch';
+import { E2E_LAUNCH_OFF, inboxScratch, rememberInboxOf, removeInboxScratch } from './inbox-scratch';
 import { NO_BROWSER } from '../helpers/no-browser';
 
 const repo = resolve(__dirname, '../..');
@@ -177,10 +177,10 @@ function seed(dataDir: string, project: string, docsProject: string, now: number
   store.savePicks(release.message, [{ key: relQ.key, revision: relQ.revision, answer: { v: 1, key: relQ.key, kind: 'single', prompt: relQ.prompt, selected: ['Yes, as experimental'] } } as never]);
   at(3 * 24 * 60);
   const hover = send(CLAUDE, 'Hover cards on review surfaces', 'Hover cards are in on all three review surfaces. I will send pictures of the light, dark and phone passes once the dark pass is done.');
-  store.createCard({ project_id: projectId, by: CLAUDE, title: 'Hover cards on review surfaces', column: 'designing', say: 'Sending pictures soon', threads: [hover.thread] });
+  store.createCard({ project_id: projectId, by: CLAUDE, title: 'Hover cards on review surfaces', column: 'in_progress', say: 'Sending pictures soon', threads: [hover.thread] });
   // Pi's card in the other project, not moved in 3 days either: the Board's project filter leaves it out.
   const nav = send(PI, 'Docs sidebar order', 'Started on the docs sidebar order.', docsId);
-  store.createCard({ project_id: docsId, by: PI, title: 'Docs sidebar order', column: 'building', say: 'Reordering the sidebar', threads: [nav.thread] });
+  store.createCard({ project_id: docsId, by: PI, title: 'Docs sidebar order', column: 'in_progress', say: 'Reordering the sidebar', threads: [nav.thread] });
   at(45);
   const reply = store.sendReply(hover.message, { words: 'Still waiting on those pictures. Did the phone pass happen?', idempotency_key: 'e2e-tidy-hover' });
   at(44);
@@ -203,15 +203,23 @@ test.beforeAll(async ({ browser }: { browser: Browser }) => {
   writeFileSync(
     join(dataDir, 'config.json'),
     JSON.stringify({
+      // Written whole: launch stays off, or the Board runs `claude --version` on the runner's PATH (tests/e2e/agent-cli-stubs.ts).
+      ...E2E_LAUNCH_OFF,
       inboxTour: { version: 2, seen_at: new Date(now).toISOString(), skipped_at: new Date(now).toISOString() },
       inboxNotifications: { dismissed: true },
       inboxSound: { dialogShownFor: 'tidy-e2e' },
       inboxBoard: true,
       inboxBoardIntro: { shownAt: new Date(now).toISOString() },
+      // Due on a used Inbox, and its check would run the `codex` on this PATH.
+      inboxVoiceIntro: { shownAt: new Date(now).toISOString() },
+      // The tab icon dialog (an update-day dialog): settled by a favicon already chosen.
+      favicon: 'glass',
+      // The "themes" dialog (after the tab icon dialog, ahead of the offers): settled, as for someone on another theme.
+      inboxThemeChooser: { notNeededAt: '2026-10-01T10:00:00.000Z' },
       inboxAgentNotes: { offered: true },
     }),
   );
-  const env = { PATH: process.env.PATH ?? '', HOME: root, PLANNOTATOR_DATA_DIR: dataDir, PLANNOTATOR_BROWSER: NO_BROWSER, PLANNOTATOR_INBOX_CONNECT: '0', PLANNOTATOR_UPDATE_CHECK: '0' };
+  const env = { PATH: process.env.PATH ?? '', HOME: root, PLANNOTATOR_RELAY_URL: 'http://127.0.0.1:9', PLANNOTATOR_DATA_DIR: dataDir, PLANNOTATOR_BROWSER: NO_BROWSER, PLANNOTATOR_INBOX_CONNECT: '0', PLANNOTATOR_UPDATE_CHECK: '0' };
   const started = spawnSync(binary, ['inbox', '--background'], { env, encoding: 'utf8', timeout: 60_000 });
   expect(started.status, started.stderr).toBe(0);
   rememberInboxOf(dataDir);
@@ -306,6 +314,8 @@ test('a phone: the ⋮ and the popover as a bottom sheet, on the list and the Bo
     await shot(page, 'list-menu-closed-390');
     await trigger.click();
     await expect(page.locator('[data-tidy-item]')).toBeVisible();
+    // The sheet rises from the bottom: however many items it holds, its first (Tidy) stays on a 390×664 screen.
+    await expect(page.locator('[data-tidy-item]')).toBeInViewport({ ratio: 1 });
     await shot(page, 'list-menu-open-390');
     await page.locator('[data-tidy-item]').click();
     const pop = page.locator('[data-tidy-popover]');
@@ -321,10 +331,25 @@ test('a phone: the ⋮ and the popover as a bottom sheet, on the list and the Bo
     await shot(page, 'board-menu-closed-390');
     await boardTrigger.click();
     await expect(page.locator('[data-tidy-item]')).toBeVisible();
+    await expect(page.locator('[data-tidy-item]')).toBeInViewport({ ratio: 1 });
     await shot(page, 'board-menu-open-390');
     await page.locator('[data-tidy-item]').click();
     await expect(page.locator('[data-tidy-popover]')).toBeVisible();
     await shot(page, 'board-popover-390');
+    await page.keyboard.press('Escape');
+
+    // Every bottom sheet shares the rule, the thread's ⋮ too: taller than a 320×568 screen, it starts below the top
+    // edge and scrolls inside to its last item.
+    await page.setViewportSize({ width: 320, height: 568 });
+    await page.goto(`${world.url}#thread=${world.t.hover.thread}`);
+    await page.locator('section.ib-pane [data-thread-more]').click();
+    const threadSheet = page.locator('[data-thread-menu]');
+    const threadItems = threadSheet.getByRole('menuitem');
+    await expect(threadItems.first()).toBeInViewport({ ratio: 1 });
+    expect(await threadSheet.evaluate((el) => el.getBoundingClientRect().top)).toBeGreaterThanOrEqual(0);
+    await threadSheet.evaluate((el) => el.scrollTo(0, el.scrollHeight));
+    await expect(threadItems.last()).toBeInViewport({ ratio: 1 });
+    await shot(page, 'thread-menu-320');
   } finally {
     await context.close();
   }

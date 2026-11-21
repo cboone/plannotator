@@ -11,7 +11,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { InboxUpdate } from "@plannotator/core/inbox-types";
 import { loadConfig, saveConfig } from "@plannotator/shared/config";
-import { readUpdateState, writeReleaseNotes, writeUpdateState, type FetchReleaseResult } from "@plannotator/shared/update-check";
+import {
+  readUpdateState,
+  RELEASE_NOTES_PENDING_RETRY_MS,
+  writeReleaseNotes,
+  writeUpdateState,
+  type FetchReleaseResult,
+} from "@plannotator/shared/update-check";
 import { InboxStore } from "@plannotator/shared/inbox/store";
 import { inboxUsedBefore, startInboxServer, type InboxServer } from "./inbox";
 import { deriveInboxUpdate, failureDetails } from "./inbox-updates";
@@ -274,6 +280,28 @@ describe("Update now", () => {
     expect(readUpdateState(dataDir).pending).toMatchObject({ version: "0.28.12", by: "person" });
   });
 
+  test("the installer gets the login shell's PATH once the Inbox has read it (claude and nvm's node outside its own PATH)", async () => {
+    // A sandboxed Inbox's login shell is PLANNOTATOR_TEST_LAUNCH_PATH (inbox.ts), never the person's.
+    const saved = { sandbox: process.env.PLANNOTATOR_TEST_SANDBOX, path: process.env.PLANNOTATOR_TEST_LAUNCH_PATH };
+    process.env.PLANNOTATOR_TEST_SANDBOX = "1";
+    process.env.PLANNOTATOR_TEST_LAUNCH_PATH = "/opt/login-shell/bin:/usr/bin";
+    try {
+      const server = await start();
+      await waitFor(() => health(server), (u) => u !== null);
+      // New message's sessions read is what reads the login shell.
+      await fetch(`http://127.0.0.1:${server.port}/api/inbox/sessions`);
+      await Bun.sleep(100);
+      expect((await post(server, "/api/inbox/update")).status).toBe(200);
+      expect(launches).toHaveLength(1);
+      expect(launches[0]!.extraPath).toEqual(["/opt/login-shell/bin", "/usr/bin"]);
+    } finally {
+      if (saved.sandbox === undefined) delete process.env.PLANNOTATOR_TEST_SANDBOX;
+      else process.env.PLANNOTATOR_TEST_SANDBOX = saved.sandbox;
+      if (saved.path === undefined) delete process.env.PLANNOTATOR_TEST_LAUNCH_PATH;
+      else process.env.PLANNOTATOR_TEST_LAUNCH_PATH = saved.path;
+    }
+  });
+
   test("a tab left open on an older Inbox (another serverSession) gets 409 and starts nothing", async () => {
     const server = await start();
     await waitFor(() => health(server), (u) => u !== null);
@@ -360,7 +388,8 @@ describe("Remind me tomorrow, Settings, What's new", () => {
     expect((await post(server, "/api/inbox/settings", { auto_update: "yes" })).status).toBe(422);
     expect((await post(server, "/api/inbox/settings", { update_check: false })).status).toBe(200);
     expect(loadConfig().updateCheck).toBe(false);
-    expect(await health(server)).toBeNull();
+    // Off stops the automatic checks only: the release already known stays one click away.
+    expect((await health(server))?.state).toBe("available");
   });
 
   test("What's new: the notes, and the releases skipped in between", async () => {
@@ -544,6 +573,35 @@ describe("What's new for a version installed outside the Inbox (no notes saved)"
     expect(tagRequests).toEqual(["0.28.10"]);
   });
 
+  // The 0.28.37 bug: the Inbox started on the new version while the release
+  // still carried GitHub's generated body; the written notes replaced it 39 s
+  // later, and the link stayed hidden for the whole run (a 24 h back-off).
+  test("asked before the release notes were written: the link shows once the 15-minute retry saves them, without a restart", async () => {
+    let clock = Date.now();
+    const publishedAt = new Date(clock - 60_000).toISOString();
+    let written = false;
+    answer = (version) =>
+      Response.json({
+        tag_name: `v${version}`,
+        published_at: publishedAt,
+        body: written ? `## What's New in v${version}\n\nWhat ${version} brings.\n\n## Install / Update\n` : "## What's Changed\n\n* a PR\n",
+      });
+    const server = await start({
+      updates: { fetchRelease: latest(), now: () => clock, isManaged: () => true, listSessions: () => [], launchInstaller: () => {} },
+    });
+    // The generated body saved no notes: the link goes, and the ticks ask no more for now.
+    expect(await waitFor(() => listUpdated(server), (v) => v === null)).toBeNull();
+    await Bun.sleep(150); // a few health ticks
+    expect(tagRequests).toEqual(["0.28.10"]);
+
+    written = true;
+    clock += RELEASE_NOTES_PENDING_RETRY_MS;
+    // The next health tick asks again, saves the notes, and the list (and the event stream) carry the link.
+    expect(await waitFor(() => listUpdated(server), (v) => v === "0.28.10")).toBe("0.28.10");
+    expect(tagRequests).toEqual(["0.28.10", "0.28.10"]);
+    expect((await (await whatsNew(server, "0.28.10")).json()).notes).toBe("What 0.28.10 brings.");
+  });
+
   test("a version this Inbox has no reason to show is never fetched", async () => {
     const server = await startReal();
     expect((await whatsNew(server, "0.27.1")).status).toBe(404);
@@ -552,17 +610,17 @@ describe("What's new for a version installed outside the Inbox (no notes saved)"
   });
 });
 
-describe("the question sound (config.json inboxSound)", () => {
+describe("the sound (config.json inboxSound)", () => {
   const settingsOf = async (server: InboxServer) => (await (await fetch(`http://127.0.0.1:${server.port}/api/inbox/settings`)).json()).sound;
   // These tests restart servers; never reuse a socket from a stopped instance.
   const postJson = (server: InboxServer, path: string, body: unknown) =>
     fetch(`http://127.0.0.1:${server.port}${path}`, { keepalive: false, method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   const claim = async (server: InboxServer) => (await (await postJson(server, "/api/inbox/sound/dialog", { serverSession: server.serverSession })).json()).show;
 
-  test("on at 60 unless set; saved field by field; anything else refused with nothing written", async () => {
+  test("on at 60 for every agent message unless set; saved field by field; anything else refused with nothing written", async () => {
     writeUpdateState({ inboxVersion: "0.28.9" }, dataDir);
     const server = await start();
-    expect(await settingsOf(server)).toEqual({ enabled: true, volume: 60, dialog_shown_for: null, dialog_due: true });
+    expect(await settingsOf(server)).toEqual({ enabled: true, volume: 60, when: "messages", dialog_shown_for: null, dialog_due: true });
     for (const bad of [
       { enabled: "yes" },
       { volume: 0 },
@@ -573,6 +631,8 @@ describe("the question sound (config.json inboxSound)", () => {
       { dialog_shown_for: "0.28.10" },
       { dialog_due: false },
       { ring: true },
+      { when: "always" },
+      { when: true },
       [true],
     ]) {
       const refused = await postJson(server, "/api/inbox/settings", { serverSession: server.serverSession, sound: bad });
@@ -580,10 +640,67 @@ describe("the question sound (config.json inboxSound)", () => {
     }
     expect(loadConfig().inboxSound).toEqual({ dialogDueFor: "0.28.10" });
     const saved = await postJson(server, "/api/inbox/settings", { serverSession: server.serverSession, sound: { volume: 30 } });
-    expect((await saved.json()).sound).toEqual({ enabled: true, volume: 30, dialog_shown_for: null, dialog_due: true });
+    expect((await saved.json()).sound).toEqual({ enabled: true, volume: 30, when: "messages", dialog_shown_for: null, dialog_due: true });
     await postJson(server, "/api/inbox/settings", { serverSession: server.serverSession, sound: { enabled: false } });
-    expect(await settingsOf(server)).toEqual({ enabled: false, volume: 30, dialog_shown_for: null, dialog_due: true });
-    expect(loadConfig().inboxSound).toEqual({ dialogDueFor: "0.28.10", volume: 30, enabled: false });
+    expect(await settingsOf(server)).toEqual({ enabled: false, volume: 30, when: "messages", dialog_shown_for: null, dialog_due: true });
+    await postJson(server, "/api/inbox/settings", { serverSession: server.serverSession, sound: { when: "asks" } });
+    expect(await settingsOf(server)).toEqual({ enabled: false, volume: 30, when: "asks", dialog_shown_for: null, dialog_due: true });
+    expect(loadConfig().inboxSound).toEqual({ dialogDueFor: "0.28.10", volume: 30, enabled: false, when: "asks" });
+  });
+
+  test("an update keeps the sound off for someone who turned it off; everyone who never chose gets every agent message", async () => {
+    // Saved by an Inbox from before the choice: off, and no `when`.
+    writeUpdateState({ inboxVersion: "0.28.9" }, dataDir);
+    saveConfig({ inboxSound: { enabled: false, volume: 40 } });
+    const server = await start();
+    expect(await settingsOf(server)).toMatchObject({ enabled: false, volume: 40, when: "messages" });
+    // Nothing is written for it: the default is read, never stored.
+    expect(loadConfig().inboxSound).toMatchObject({ enabled: false, volume: 40 });
+    expect(loadConfig().inboxSound?.when).toBeUndefined();
+  });
+
+  test("a save reaches every other open window at once (event: sound): the choice, the switch and the volume", async () => {
+    writeUpdateState({ inboxVersion: "0.28.9" }, dataDir);
+    const server = await start();
+    // Two other windows listening (another tab, another browser).
+    const listen = async (window: string) => {
+      const controller = new AbortController();
+      const stream = await fetch(`http://127.0.0.1:${server.port}/api/inbox/events?cursor=${server.store.cursor()}&window=${window}&permission=granted`, { signal: controller.signal });
+      const reader = stream.body!.getReader();
+      const decoder = new TextDecoder();
+      const seen = { text: "" };
+      while (!seen.text.includes("event: hello")) seen.text += decoder.decode((await reader.read()).value);
+      const until = async (frames: number) => {
+        const deadline = Date.now() + 3000;
+        while (seen.text.split("event: sound\n").length - 1 < frames && Date.now() < deadline) {
+          const chunk = await Promise.race([reader.read(), new Promise<null>((resolve) => setTimeout(() => resolve(null), 200))]);
+          if (chunk && chunk.value) seen.text += decoder.decode(chunk.value);
+        }
+        return seen.text.split("event: sound\ndata: ").slice(1).map((frame) => JSON.parse(frame.split("\n")[0]!) as { sound: unknown; rev: number });
+      };
+      return { until, stop: () => controller.abort() };
+    };
+    const a = await listen("window-sound-a");
+    const b = await listen("window-sound-b");
+    const revs: number[] = [];
+    for (const sound of [{ when: "asks" }, { enabled: false }, { volume: 30 }]) {
+      revs.push((await (await postJson(server, "/api/inbox/settings", { serverSession: server.serverSession, sound })).json()).sound_rev);
+    }
+    // A refused save tells no one.
+    await postJson(server, "/api/inbox/settings", { serverSession: server.serverSession, sound: { when: "always" } });
+    const expected = [
+      { enabled: true, volume: 60, when: "asks", dialog_shown_for: null, dialog_due: true },
+      { enabled: false, volume: 60, when: "asks", dialog_shown_for: null, dialog_due: true },
+      { enabled: false, volume: 30, when: "asks", dialog_shown_for: null, dialog_due: true },
+    ];
+    const heardA = await a.until(3);
+    expect(heardA.map((frame) => frame.sound)).toEqual(expected);
+    expect((await b.until(4)).map((frame) => frame.sound)).toEqual(expected);
+    // Each frame carries its save's count, the one the save answered, and a later save's is larger (the page's order guard).
+    expect(heardA.map((frame) => frame.rev)).toEqual(revs);
+    expect(revs[0]! < revs[1]! && revs[1]! < revs[2]!).toBe(true);
+    a.stop();
+    b.stop();
   });
 
   test("after an update the dialog is claimed once: of two tabs asking together one shows it, and a reload never does", async () => {
@@ -681,7 +798,6 @@ describe("deriveInboxUpdate", () => {
   const base = {
     current: "0.28.10",
     onDisk: null,
-    checksOn: true,
     managed: true,
     lockHeld: false,
     state: { latestRelease: { tag: "0.28.12", fetchedAt: NOW } },
@@ -693,13 +809,9 @@ describe("deriveInboxUpdate", () => {
     expect(deriveInboxUpdate({ ...base, lockHeld: true })?.state).toBe("updating");
     expect(deriveInboxUpdate({ ...base, lockHeld: true, onDisk: "0.28.12" })).toMatchObject({ state: "ready", version: "0.28.12" });
   });
-  test("nothing when up to date, checks off, or snoozed for this version", () => {
+  test("nothing when up to date, or snoozed for this version", () => {
     expect(deriveInboxUpdate({ ...base, current: "0.28.12" })).toBeNull();
-    expect(deriveInboxUpdate({ ...base, checksOn: false })).toBeNull();
     expect(deriveInboxUpdate({ ...base, state: { ...base.state, snooze: { version: "0.28.12", until: NOW + 1 } } })).toBeNull();
     expect(deriveInboxUpdate({ ...base, state: { ...base.state, snooze: { version: "0.28.12", until: NOW - 1 } } })?.state).toBe("available");
-  });
-  test("ready even with checks off: a newer binary is already installed", () => {
-    expect(deriveInboxUpdate({ ...base, checksOn: false, onDisk: "0.28.12" })?.state).toBe("ready");
   });
 });

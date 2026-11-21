@@ -2,10 +2,9 @@
  * Annotatable file-type predicates — the single source of truth for which
  * files the annotate flow accepts (#1029).
  *
- * Annotate reads files as UTF-8 text and renders them exactly the way `.txt`
- * is rendered (plain text through the markdown pipeline), so any
- * unambiguously plain-text format is safe to accept. The set is deliberately
- * conservative:
+ * Annotate reads files as UTF-8 text, so any unambiguously plain-text format
+ * is safe to accept. How each one renders is a separate question, answered by
+ * `documentRenderKindForPath` below. The set is deliberately conservative:
  *
  * - Markdown/plain docs: .md .mdx .txt
  * - Config/data formats: .yaml .yml .json .jsonc .json5 .toml .ini .cfg
@@ -32,12 +31,27 @@
  * `documentRenderKindForPath` covers both families. AsciiDoc has no
  * frontmatter, so `shouldStripFrontmatter` returns false for it.
  *
+ * Config and data files are a FIFTH FAMILY, `renderAs: "code"`: the body is
+ * the raw file, and the editor shows it as ONE code block, syntax-highlighted
+ * in its own language (`codeDocumentLanguage`) and annotatable like any fence.
+ * Through the markdown pipeline (#1099's first pass) a TOML or YAML comment
+ * became a heading and a backticked name a code chip. `.txt` stays markdown:
+ * it is prose as often as not.
+ *
+ * `.env` files (`.env`, `.env.local`, … — `isSecretEnvPath`) commonly hold
+ * secrets, so they are annotatable only when the person names one: the CLI's
+ * explicit path (an absolute path, or one relative to the project). They are
+ * never found by name search, listed in the folder browser or opened as a
+ * linked document, and an annotate session on one keeps nothing in the data
+ * dir: no version history copy, no submit record, no feedback archive entry
+ * (the servers turn annotate history off for it; `computeAnnotateHistory`
+ * refuses it too). What the person then does with it is theirs: Ask AI, a
+ * share link, the feedback the agent gets. Through 0.28.61 they were refused.
+ * `.env.example` (the secret-free template convention) is an ordinary code
+ * document. `.env` is still denylisted for the user-configurable extra
+ * extensions below, so no config value makes it searchable or listed.
+ *
  * Deliberate exclusions:
- * - `.env` — commonly holds secrets, and annotate's per-file version history
- *   copies file contents into the data dir (`~/.plannotator/history/`).
- *   `.env.example` (the secret-free template convention) is accepted.
- *   `.env` is also denylisted for the user-configurable extra extensions
- *   below, so no config value can register it.
  * - Source-code extensions (.ts, .py, …) — those belong to the code-file
  *   link/popout system (`CODE_FILE_REGEX` in `code-file.ts`) and would also
  *   flood the annotate folder file browser.
@@ -45,8 +59,8 @@
  * Note the overlap with `CODE_FILE_REGEX` (.yaml/.json/.toml/.ini/.xml appear
  * in both): a path's *rendering* depends on the surface. Code-file links
  * inside a document keep the syntax-highlighted popout; the annotate CLI and
- * the annotate file browser render the same file as an annotatable plain-text
- * document.
+ * the annotate file browser render the same file as an annotatable code
+ * document (`renderAs: "code"`).
  *
  * User-configurable extras (#1307): a user may register additional extensions
  * (for example `.livemd`, Livebook notebooks) via `markdownExtensions` in
@@ -111,24 +125,74 @@ export function annotateDiagramRenderKind(options: {
 }
 
 /** A text source that does not render through the markdown parser. */
-export type DocumentRenderKind = DiagramRenderKind | "asciidoc";
+export type DocumentRenderKind = DiagramRenderKind | "asciidoc" | "code";
 
 const ASCIIDOC_FILE_RE = /\.(?:adoc|asciidoc)$/i;
 
+/** Config and data files shown as their own text: one code block, never markdown. */
+const CODE_DOCUMENT_RE = /(?:\.(?:ya?ml|jsonc?|json5|toml|ini|cfg|conf|properties|csv|tsv|log|xml)|\.env\.example)$/i;
+
+/** A `.env` file that may hold secrets: `.env` or `.env.<anything>`, but not the `.env.example` template. */
+const SECRET_ENV_RE = /(?:^|[\\/])\.env(?:\.[^\\/]+)?$/i;
+
+/**
+ * Whether `path` names a `.env` file (`.env`, `.env.local`, `.env.production`;
+ * not `.env.example`). Annotatable only when named explicitly, and never
+ * copied into the data dir (see the module comment).
+ */
+export function isSecretEnvPath(path: string | null | undefined): boolean {
+	if (!path) return false;
+	const trimmed = path.trim();
+	return SECRET_ENV_RE.test(trimmed) && !/\.env\.example$/i.test(trimmed);
+}
+
+/**
+ * Shiki grammar per code-document extension. `.cfg` and `.conf` have none:
+ * the name says nothing about the syntax inside (an nginx `.conf` is not INI),
+ * and a fence is never highlighted by guessing (#1212).
+ */
+const CODE_DOCUMENT_LANGUAGES: ReadonlyArray<readonly [RegExp, string]> = [
+	[/\.ya?ml$/i, "yaml"],
+	[/\.json$/i, "json"],
+	[/\.jsonc$/i, "jsonc"],
+	[/\.json5$/i, "json5"],
+	[/\.toml$/i, "toml"],
+	[/\.(?:ini|properties)$/i, "ini"],
+	[/\.xml$/i, "xml"],
+	[/\.csv$/i, "csv"],
+	[/\.tsv$/i, "tsv"],
+	[/\.log$/i, "log"],
+	[/\.env\.example$/i, "dotenv"],
+	[SECRET_ENV_RE, "dotenv"],
+];
+
+/**
+ * The grammar a `renderAs: "code"` document is highlighted with, or undefined
+ * for a file shown as plain monospace text.
+ */
+export function codeDocumentLanguage(path: string | null | undefined): string | undefined {
+	if (!path) return undefined;
+	const trimmed = path.trim();
+	return CODE_DOCUMENT_LANGUAGES.find(([re]) => re.test(trimmed))?.[1];
+}
+
 /**
  * The renderer `input` needs instead of the markdown parser, or null for
- * markdown. Diagram engines first, then AsciiDoc. The `renderAs` value both
- * annotate servers put on /api/plan and /api/doc for a text source.
+ * markdown. Diagram engines first, then AsciiDoc, then config and data files.
+ * The `renderAs` value both annotate servers put on /api/plan and /api/doc for
+ * a text source.
  */
 export function documentRenderKindForPath(input: string): DocumentRenderKind | null {
 	const diagram = diagramRenderKindForPath(input);
 	if (diagram !== null) return diagram;
-	return ASCIIDOC_FILE_RE.test(input.trim()) ? "asciidoc" : null;
+	const trimmed = input.trim();
+	if (ASCIIDOC_FILE_RE.test(trimmed)) return "asciidoc";
+	return CODE_DOCUMENT_RE.test(trimmed) || isSecretEnvPath(trimmed) ? "code" : null;
 }
 
-/** True when `value` is a diagram kind or `"asciidoc"`. */
+/** True when `value` is a diagram kind, `"asciidoc"` or `"code"`. */
 export function isDocumentRenderKind(value: unknown): value is DocumentRenderKind {
-	return isDiagramRenderKind(value) || value === "asciidoc";
+	return isDiagramRenderKind(value) || value === "asciidoc" || value === "code";
 }
 
 /**

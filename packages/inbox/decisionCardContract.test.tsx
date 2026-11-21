@@ -217,10 +217,26 @@ describe.skipIf(!hasDom)('decision mode: the contract lines', () => {
     const seen = render(decision(DRAWERS, DRAWER_PICTURES));
     press($$('[data-question-zoom]')[2]!);
     expect(seen.answers).toHaveLength(0);
-    expect(seen.images).toEqual([{ names: ['Drawer A', 'Drawer B', 'Drawer C'], index: 2 }]);
+    // The viewer names each picture by its choice (letter and label), not the picture's alt text.
+    expect(seen.images).toEqual([{ names: ['A · Total on top', 'B · Total pinned with Pay', 'C · Three steps'], index: 2 }]);
     press($$('[data-question-picture]')[1]!);
     expect(seen.images).toHaveLength(1);
     expect(seen.answers.map((a) => a.selected)).toEqual([['B · Total pinned with Pay']]);
+  });
+
+  test('a picture two choices share opens as the choice zoomed, not the first one showing it', () => {
+    const shared = question({
+      choices: [
+        { label: 'A · Strip left', description: null, recommended: false, settled: false, image: { alt: 'Strip', src: 'strip.png' } },
+        { label: 'B · Strip right', description: null, recommended: false, settled: false, image: { alt: 'Strip', src: 'strip.png' } },
+        { label: 'C · Bar', description: null, recommended: false, settled: false, image: { alt: 'Bar', src: 'bar.png' } },
+      ],
+    });
+    const seen = render(decision(shared, { inline: ['strip', 'bar'].map((x) => ({ attachment_id: `att_${x}`, ref: `${x}.png`, name: `${x}.png`, media_type: 'image/png', width: 2800, height: 200 })), attachments: [] }));
+    press($$('[data-question-zoom]')[1]!);
+    press($$('[data-question-zoom]')[2]!);
+    const names = ['A · Strip left', 'B · Strip right', 'C · Bar'];
+    expect(seen.images).toEqual([{ names, index: 1 }, { names, index: 2 }]);
   });
 
   test('a tile answers from the keyboard too: the arrows only move, Enter answers', () => {

@@ -16,7 +16,7 @@
  * in PLANNOTATOR_TAG_HANDOFF_SHOTS when it names a folder.
  */
 
-import { expect, test, type Browser, type BrowserContext, type Locator, type Page } from '@playwright/test';
+import { expect, test, type Browser, type BrowserContext, type Locator, type Page } from './inbox-test';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -25,6 +25,7 @@ import {
   INBOX_HANDOFF_INSTRUCTION,
   INBOX_TAGGED_INSTRUCTION,
   inboxHandedAwayLine,
+  inboxStopNoticeId,
   inboxWakeText,
 } from '../../packages/shared/inbox/connection';
 import { seedTagWorld, TAG_SESSIONS, type TagWorld } from '../helpers/inbox-tag-world';
@@ -91,7 +92,7 @@ async function openReply(page: Page, threadId: string): Promise<Locator> {
   const pane = page.locator('section.ib-pane');
   await expect(pane.locator('h2.ib-subject')).toBeVisible();
   const box = pane.getByRole('textbox', { name: /^Reply to/ });
-  const reply = pane.locator('.ib-pfoot').getByRole('button', { name: /^(Reply|Edit draft)$/ });
+  const reply = pane.locator('.ib-pfoot').getByRole('button', { name: /^Reply$|Edit draft$/ });
   for (let attempt = 0; attempt < 10 && !(await box.isVisible()); attempt += 1) {
     await reply.click({ timeout: 1_000 }).catch(() => {});
   }
@@ -132,6 +133,7 @@ test.beforeAll(async ({ browser }: { browser: Browser }) => {
   const env = {
     PATH: process.env.PATH ?? '',
     HOME: root,
+    PLANNOTATOR_RELAY_URL: 'http://127.0.0.1:9',
     PLANNOTATOR_DATA_DIR: dataDir,
     PLANNOTATOR_BROWSER: NO_BROWSER,
     NO_BROWSER,
@@ -206,7 +208,10 @@ test('Add: the agent joins with the added wake, the thread says so, and a later 
   await expect(links(page)).toHaveText(['Ask instead']);
   await shot(page, '2-switched-add-desktop');
   await send(page);
-  await expect(page.locator('[data-thread-move="added"]')).toContainText('You added OpenCode to this thread');
+  // Two sessions in the thread now: one quiet line, the added session by its name.
+  const added = page.locator('[data-thread-move="added"]');
+  await expect(added).toHaveAttribute('data-quiet', '');
+  await expect(added).toHaveText(/^You added OpenCode · \S/);
   await expect(page.locator('[data-thread-owner]')).toHaveCount(0);
   const sent = await lastPersonMessage(world.tags.ids.t3);
   expect(sent.tags).toEqual([expect.objectContaining({ session: S.opencode, joined: true })]);
@@ -251,6 +256,7 @@ test('Hand off, then Undo inside the window: nobody is handed it while held, and
   await page.waitForTimeout(2_000);
   expect(handed(S.pi, sent.id)).toBeUndefined();
   expect(handed(S.owner, sent.id)).toBeUndefined();
+  expect(handed(S.owner, inboxStopNoticeId(sent.id))).toBeUndefined();
   await move.locator('[data-handoff-undo]').click();
   await expect.poll(async () => !!(await lastPersonMessage(world.tags.ids.t1)).handoff?.undone_at).toBe(true);
   const undone = await lastPersonMessage(world.tags.ids.t1);
@@ -285,8 +291,8 @@ test('Hand off settles: the new owner gets the hand-off wake, the former owner o
   expect(handed(S.pi, sent.id)!.handoff).toEqual({ from: 'Claude Code' });
   expect(piWake[1]).toBe(INBOX_HANDOFF_INSTRUCTION);
   expect(piWake.join('\n')).toContain('the queue work is yours now.');
-  await expect.poll(() => !!handed(S.owner, sent.id), { timeout: 15_000 }).toBe(true);
-  const told = handed(S.owner, sent.id)!;
+  await expect.poll(() => !!handed(S.owner, inboxStopNoticeId(sent.id)), { timeout: 15_000 }).toBe(true);
+  const told = handed(S.owner, inboxStopNoticeId(sent.id))!;
   expect(told.handed_away).toEqual({ to: 'Pi' });
   expect(told.body).toBe(inboxHandedAwayLine('Pi'));
   expect(inboxWakeText(told)).not.toContain('the queue work is yours now.');

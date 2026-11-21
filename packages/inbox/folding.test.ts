@@ -7,7 +7,7 @@ import { expect, test } from 'bun:test';
 import type { InboxAuthor, InboxMessageWire, InboxThread } from '@plannotator/core/inbox-types';
 import { QUESTION_ANSWERS_HEADING } from '@plannotator/core/question-block';
 import { parseInboxQuestionBlocks } from '@plannotator/core/inbox-questions';
-import { SNIPPET_PROMPT_MAX, answerWords, cleanInline, cutAtWord, firstWords, foldSnippet, lookBoundary, newSinceLook, plainLabel, planFolds, replyWords, snippetText } from './folding';
+import { KEPT_CHARS_MAX, SNIPPET_PROMPT_MAX, answerWords, cleanInline, cutAtWord, firstWords, foldSnippet, keptFirstWords, keptFirstWordsChars, lookBoundary, newSinceLook, plainLabel, planFolds, replyWords, snippetText } from './folding';
 
 const AGENT: InboxAuthor = { kind: 'agent', host: 'claude-code', session: 'ses_a', name: null };
 const PERSON: InboxAuthor = { kind: 'person' };
@@ -60,6 +60,25 @@ test('the fold plan: open when new, holding an unsent pick, or last; each read r
   expect(planFolds(messages, new Set(), null).folded.size).toBe(0);
 });
 
+test('past 20 new, only the newest 20 open: the older new ones hide behind one fold (the first message stays a line), a pick not sent stays open', () => {
+  const ids = Array.from({ length: 26 }, (_, i) => `m${i + 1}`);
+  const messages = ids.map((id, i) => msg(id, AGENT, i + 1));
+  // m1, m2 read; m3..m26 (24) new: m3..m6 hide, m7..m26 open.
+  const fresh = newSinceLook(messages, 2);
+  const plan = planFolds(messages, fresh, 2);
+  expect(plan.hidden).toEqual([['m3', 'm4', 'm5', 'm6']]);
+  expect([...plan.folded]).toEqual(['m1', 'm2', 'm3', 'm4', 'm5', 'm6']);
+  // Every message new: the first stays as its line above the fold.
+  expect(planFolds(messages, newSinceLook(messages, 0), 0).hidden).toEqual([['m2', 'm3', 'm4', 'm5', 'm6']]);
+  // An unsent pick among the older new ones stays open and splits the fold.
+  const picked = messages.map((m) => (m.id === 'm4' ? { ...m, questions: [{ state: 'picked' } as never] } : m));
+  const split = planFolds(picked, fresh, 2);
+  expect(split.hidden).toEqual([['m3'], ['m5', 'm6']]);
+  expect(split.folded.has('m4')).toBe(false);
+  // Exactly 20 new: as before, every one open.
+  expect(planFolds(messages.slice(0, 22), fresh, 2).hidden).toEqual([]);
+});
+
 test("a folded line's first words: question blocks, fences, tables and images out; marks and link targets gone; cut at a word", () => {
   const body = [
     '## Search',
@@ -85,6 +104,10 @@ test("a folded line's first words: question blocks, fences, tables and images ou
   ].join('\n');
   expect(firstWords(body)).toBe('Search I looked at three ways: see the plan and docs-search. Built at deploy Quoted');
   expect(firstWords('word '.repeat(100), 40)).toBe(`${'word '.repeat(8).trim()}…`);
+});
+
+test("an author's coloured words (#3345) preview as words, with no tag or style", () => {
+  expect(firstWords('Coverage fell to <span style="color: #d00000">73.0%</span> and <font color=green>**ok**</font>.')).toBe('Coverage fell to 73.0% and ok.');
 });
 
 test('emphasis marks go only where they pair at word boundaries; snake_case, arithmetic and inline code keep their characters', () => {
@@ -232,4 +255,39 @@ test('a reply of pasted files alone: the snippet names the files, never the stil
   expect(foldSnippet(reply)).toEqual({ kind: 'words', text: 'pasted-image-2026-10-16-0912.png, notes.md' });
   // With words, the words.
   expect(foldSnippet({ ...reply, body: `See these.\n\n${line}` })).toEqual({ kind: 'words', text: 'See these.' });
+});
+
+test('a long thread’s folded lines read through keptFirstWords say what a fresh read says, and an edited body gets its own words', () => {
+  const line = "No question answered yet; it is still open. Don't re-ask it; the person will answer in the Inbox.";
+  const file = (name: string) => ({ id: `att_${name}`, name }) as NonNullable<InboxMessageWire['attachments']>[number];
+  const long = Array.from({ length: 400 }, (_, i) => `Line ${i} of the trace, with **bold** and a [link](https://x.test/${i}).`).join('\n');
+  const messages = [
+    msg('m1', AGENT, 1, { body: '```ts\nconst a = 1;\n```\n\nThe retry worker charges twice.' }),
+    msg('m2', AGENT, 2, { body: long }),
+    msg('m3', PERSON, 3, { body: `See these.\n\n${line}` }),
+    msg('m4', PERSON, 4, { body: line, attachments: [file('notes.md')] }),
+    msg('m5', AGENT, 5, { body: '' }),
+    msg('m6', PERSON, 6, { body: '' }),
+  ];
+  for (let pass = 0; pass < 2; pass++) {
+    for (const message of messages) expect(foldSnippet(message, messages, keptFirstWords)).toEqual(foldSnippet(message, messages));
+  }
+  // The same message with new words (an edit, a refresh): the line follows the words, never the kept ones.
+  const edited = { ...messages[1]!, body: `Fixed: one charge now.\n${long}` };
+  expect(snippetText(foldSnippet(edited, messages, keptFirstWords))).toBe(snippetText(foldSnippet(edited, messages)));
+  expect(snippetText(foldSnippet(edited, messages, keptFirstWords)).startsWith('Fixed: one charge now.')).toBe(true);
+});
+
+test('keptFirstWords holds no more than its character cap, however many long bodies a window reads', () => {
+  const plan = (i: number) => `Plan ${i}: move the retry worker.\n${'A long step of the plan, read once. '.repeat(30_000)}`;
+  const count = Math.ceil((3 * KEPT_CHARS_MAX) / plan(0).length);
+  for (let i = 0; i < count; i++) {
+    expect(keptFirstWords(plan(i))).toBe(firstWords(plan(i)));
+    expect(keptFirstWordsChars()).toBeLessThanOrEqual(KEPT_CHARS_MAX);
+  }
+  // A body longer than the cap on its own still gets its words, and is not kept.
+  const huge = `Huge.\n${'x '.repeat(KEPT_CHARS_MAX)}`;
+  const before = keptFirstWordsChars();
+  expect(keptFirstWords(huge)).toBe(firstWords(huge));
+  expect(keptFirstWordsChars()).toBe(before);
 });

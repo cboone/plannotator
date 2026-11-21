@@ -25,7 +25,7 @@
  * PNG frames of two returns land in PLANNOTATOR_SCROLL_RETURN_SHOTS when set.
  */
 
-import { devices, expect, test, webkit, type Browser, type Page } from '@playwright/test';
+import { devices, expect, test, webkit, type Browser, type Page } from './inbox-test';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -205,7 +205,11 @@ async function roundTrip(p: Page, { file, opener, how, narrow = false, shot }: {
   const before = await where(p, selector);
   expect(before.scrollTop, 'the thread is scrolled before the file opens').toBeGreaterThan(40);
   if (shot && shotsDir) await p.screenshot({ path: join(shotsDir, `${shot}-1-thread.png`) });
-  await p.locator(selector).click();
+  // Pressed where it is, as a person presses it: never scrolled first. A click that finds the opener still moving
+  // (the thread settles a pixel as its far messages' controls go plain) retries, and Playwright's retry scrolls the
+  // opener to the view's bottom edge (`scrollIntoView({ block: 'end' })`): the file then opens from a place
+  // 44 px from the one measured above, and comes back there, as it should.
+  await p.locator(selector).click({ scroll: 'none' });
   await expect(pane(p)).toBeVisible();
   await p.waitForTimeout(300);
   if (shot && shotsDir) await p.screenshot({ path: join(shotsDir, `${shot}-2-file.png`) });
@@ -360,7 +364,7 @@ test("a comment opened from the reply box's list right after a file closes lands
   expect(saved).toBe(200);
   await loadThread(p);
   // The reply box open first, so nothing scrolls the thread between the close and the comment.
-  await p.locator('section.ib-pane .ib-pfoot').getByRole('button', { name: /^(Reply|Edit draft)$/ }).first().click();
+  await p.locator('section.ib-pane .ib-pfoot').getByRole('button', { name: /^Reply$|Edit draft$/ }).first().click();
   await expect(p.locator('[data-annotations-chip]')).toBeVisible();
   const tile = openerSelector('foot', 'rollout.md');
   await p.locator(tile).scrollIntoViewIfNeeded();

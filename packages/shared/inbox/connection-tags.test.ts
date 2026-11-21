@@ -10,6 +10,7 @@ import {
   INBOX_REDIRECTED_NAME_MAX,
   INBOX_WAKE_AGENT_NAMES,
   INBOX_TAGGED_INSTRUCTION,
+  INBOX_WAKE_CLOSING_LINE,
   INBOX_WAKE_INSTRUCTION,
   inboxAlsoTaggedLine,
   inboxTaggedLine,
@@ -26,10 +27,11 @@ test("a tagged session's wake: its own instruction, whose thread it is, read fir
       "Plannotator Inbox: Dead-letter queue (msg_R)",
       INBOX_TAGGED_INSTRUCTION,
       "The thread belongs to another session (Claude Code); you have not seen it. Read it first with read_thread (message_id msg_R). Answer only what is addressed to you, in the same thread: plannotator_inbox send_message with reply_to msg_R.",
+      "[Thread msg_T]",
       "",
       "@Pi raise it to 30 s.",
       "",
-      "[thread msg_T · more: plannotator_inbox read_thread · how it works: plannotator inbox --help]",
+      INBOX_WAKE_CLOSING_LINE,
     ].join("\n"),
   );
   expect(text).not.toContain(INBOX_WAKE_INSTRUCTION);
@@ -66,10 +68,12 @@ test("a wake names another agent only by a host's own name: anything else (a hos
   expect(INBOX_REDIRECTED_NAME_MAX).toBe(40);
 });
 
-test("a wake names a Qwen Code owner and tagged session by name, not as another agent", () => {
-  expect(INBOX_WAKE_AGENT_NAMES).toContain(INBOX_HOST_NAMES.qwen!);
-  expect(inboxWakeText({ ...base, tagged: { owner: "Qwen Code" } }).split("\n")[2]).toBe(inboxTaggedLine("Qwen Code", base.id));
-  expect(inboxWakeText({ ...base, also_tagged: ["Qwen Code"] }).split("\n")[2]).toBe(inboxAlsoTaggedLine(["Qwen Code"]));
+test("a wake names every host's agent by name, never as another agent (the list cannot fall behind INBOX_HOST_NAMES)", () => {
+  for (const name of new Set(Object.values(INBOX_HOST_NAMES))) {
+    expect(INBOX_WAKE_AGENT_NAMES).toContain(name);
+    expect(inboxWakeText({ ...base, tagged: { owner: name } }).split("\n")[2]).toBe(inboxTaggedLine(name, base.id));
+    expect(inboxWakeText({ ...base, also_tagged: [name] }).split("\n")[2]).toBe(inboxAlsoTaggedLine([name]));
+  }
 });
 
 test("a bridge command carrying the tag fields still parses as the reply it is (an older connection ignores them)", () => {

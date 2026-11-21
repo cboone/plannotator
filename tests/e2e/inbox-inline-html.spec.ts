@@ -38,6 +38,7 @@ async function startWorld(prefix: string): Promise<World> {
     USERPROFILE: root,
     LOCALAPPDATA: join(root, "AppData", "Local"),
     APPDATA: join(root, "AppData", "Roaming"),
+    PLANNOTATOR_RELAY_URL: 'http://127.0.0.1:9',
     PLANNOTATOR_DATA_DIR: join(root, 'data'),
     PLANNOTATOR_BROWSER: NO_BROWSER,
     PLANNOTATOR_INBOX_CONNECT: '0',

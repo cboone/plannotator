@@ -5,7 +5,8 @@
  * work hiding the run (an agent left unticked is still offered, and its
  * progress never showed again); a run's agent that changed nothing not reading
  * "Nothing to change", and one whose session ended before delivery not
- * reading "Session ended".
+ * reading "Session ended"; and a stale plan still being read again
+ * (`pending`, #2593) drawn in the menu or the popover as if current.
  *
  * DOM-gated: runs under DOM_TESTS=1 (happy-dom), from the test.yml DOM list.
  */
@@ -53,7 +54,7 @@ function plan(count: number): InboxTidyPlan {
   } as InboxTidyPlan;
 }
 
-const controller = (p: InboxTidyPlan): TidyController => ({ surface: 'list', scope: null, plan: p, run: p.run, start: async () => null, refresh: () => {} });
+const controller = (p: InboxTidyPlan): TidyController => ({ surface: 'list', scope: null, plan: p as TidyController['plan'], run: p.run, start: async () => null, refresh: () => {} });
 
 async function settle() {
   await act(async () => {
@@ -84,6 +85,25 @@ test.skipIf(!hasDom)('new work and the run show together: the menu offers "Tidy 
   expect(document.querySelectorAll('[data-tidy-run-agent]')).toHaveLength(3);
 });
 
+test.skipIf(!hasDom)('a stale plan being read again (pending): the menu and the popover show Tidy as while first read, never the old plan or run', async () => {
+  const stale = { ...controller(plan(1)), pending: true };
+  const item = await openMenu(stale);
+  // No old count, and Tidy can still be opened (a phone taps ⋮, then Tidy, before the read lands).
+  expect(item.textContent).toBe('Tidy');
+  act(() => item.click());
+  await settle();
+  const panel = document.querySelector('[data-tidy-popover]')!;
+  expect(panel.textContent).toBe('Tidy');
+  expect(document.querySelectorAll('[data-tidy-run-agent]')).toHaveLength(0);
+  expect(document.querySelector('[data-tidy-agent]')).toBeNull();
+  expect(document.querySelector('[data-tidy-go]')).toBeNull();
+  // The read lands: the plan and the run show.
+  act(() => root!.render(<TidyMenu tidy={controller(plan(1))} phone={false} className="ib-lhead-more" onRefresh={() => {}} />));
+  await settle();
+  expect(document.querySelector('[data-tidy-agent="ses-c"]')).not.toBeNull();
+  expect(document.querySelectorAll('[data-tidy-run-agent]')).toHaveLength(3);
+});
+
 test.skipIf(!hasDom)('with nothing new offered the run shows alone: "Tidy · 3/3", "Nothing to change", "Session ended"', async () => {
   const item = await openMenu(controller(plan(0)));
   expect(item.textContent).toBe('Tidy · 3/3');
@@ -93,4 +113,34 @@ test.skipIf(!hasDom)('with nothing new offered the run shows alone: "Tidy · 3/3
   expect(document.querySelector('[data-tidy-run-agent="ses-b"]')!.textContent).toContain('Nothing to change');
   expect(document.querySelector('[data-tidy-run-agent="ses-a"]')!.textContent).toContain('1 thread updated');
   expect(document.querySelector('[data-tidy-run-agent="ses-d"]')!.textContent).toContain('Session ended');
+});
+
+test.skipIf(!hasDom)('a load reads only this machine’s Tidy; a linked machine is read once the person reaches for Tidy', async () => {
+  const { useTidy } = await import('./components/Tidy');
+  const realFetch = globalThis.fetch;
+  const urls: string[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    urls.push(String(input));
+    return new Response(JSON.stringify(plan(0)), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  }) as typeof fetch;
+  try {
+    const machines = { self: 'm_self', all: [], linked: [{ id: 'm_mini', name: 'Mac mini', marks: ['tidy'], state: 'online' }], names: new Map([['m_mini', 'Mac mini']]), away: new Set() } as never;
+    let tidy: ReturnType<typeof useTidy> | null = null;
+    function Probe() {
+      tidy = useTidy(null, 'list', 1, true, machines);
+      return null;
+    }
+    host = document.body.appendChild(document.createElement('div'));
+    root = createRoot(host);
+    act(() => root!.render(<Probe />));
+    await act(async () => void (await new Promise((resolve) => setTimeout(resolve, 300))));
+    expect(urls.filter((u) => u.includes('/tidy'))).toEqual([expect.stringMatching(/^\/api\/inbox\/tidy/)]);
+    await act(async () => {
+      tidy!.warm!();
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+    expect(urls.some((u) => u.startsWith('/api/inbox/m/m_mini/tidy'))).toBe(true);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });

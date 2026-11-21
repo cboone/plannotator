@@ -30,8 +30,10 @@ repositories together. The target selects the review workspace, not a file filte
 Feedback returns to the invoking session and names the directory active at submission,
 including after switching worktrees.
 
-Supply one directory or PR URL. A sole word is a directory target: a file, or a
-missing path-shaped word (containing `/`, or starting with `.` or `~`), is an error.
+Supply one directory or PR URL. A sole word is a directory target: if no such
+folder exists, or it is a file, the command stops and opens nothing. The error
+names the folder it looked in, suggests a close folder name when there is one
+("Did you mean src/components?"), and shows the command to run instead.
 Inside a sentence, a path-shaped word that names an existing directory is the target;
 one that names nothing or a file is prose. Two directories, or a directory combined
 with `--patch-file`, is an error. Other words are ignored as prose with a notice, so
@@ -112,7 +114,7 @@ Send Feedback → PR context included in feedback
 Approve → configured approval prompt sent to agent
 ```
 
-When you switch the review destination to the PR or MR itself, the header posts a platform review instead. **Post Comments** posts a neutral comment review. **Post comments, then…** opens the submission dialog with a choice between **Comment** and **Request changes**, and the empty-state **Request changes…** opens it with Request changes selected. On GitHub, Request changes posts a real "Changes requested" review. GitHub does not let you request changes on your own pull request, so that option is disabled there. GitLab has no request-changes review, so on GitLab the review posts as a comment. On Bitbucket Cloud, Approve and Request changes set your decision on the pull request (Bitbucket's Approve and Request changes buttons), after your comments are posted.
+When you switch the review destination to the PR or MR itself, the header posts a platform review instead. **Post Comments** posts a neutral comment review. **Post comments, then…** opens the submission dialog with a choice between **Comment** and **Request changes**, and the empty-state **Request changes…** opens it with Request changes selected. On GitHub, Request changes posts a real "Changes requested" review. GitHub does not let you request changes on your own pull request, so that option is disabled there. On GitLab, Request changes adds you as a reviewer if you are not one and marks you as having requested changes, after your comments are posted. On Bitbucket Cloud, Approve and Request changes set your decision on the pull request (Bitbucket's Approve and Request changes buttons), after your comments are posted.
 
 ## Stacked PRs and MRs
 
@@ -211,6 +213,16 @@ The rendered patch and expanded file contents are authoritative for Stack and Br
 
 The standalone GitButler CLI installer supports macOS and Linux. On Windows, install GitButler Desktop and make `but.exe` available on `PATH`. GitButler edit mode (`gitbutler/edit`) is not treated as a virtual-branch workspace.
 
+## Naming the tab
+
+The tab reads `<repository> · Code Review`, so two reviews of one repository (say, a pull request and your local changes) share a title. `--title` names the tab instead, exactly as given:
+
+```bash
+plannotator review https://github.com/acme/payments-service/pull/12 --title "PR 12: refunds"
+```
+
+The header keeps its branch and repository. A blank title is ignored.
+
 ## The diff viewer
 
 The review UI shows your changes in a familiar diff format:
@@ -254,16 +266,16 @@ content changes under a refresh loses its checkmark, because a check on code
 the agent just rewrote is misleading.
 
 It is on by default, and there are two off switches: **Settings → Review →
-Auto-mark viewed**, and the **Auto-mark viewed** row in the gear popover above
+Auto-mark viewed**, and the **Auto-mark viewed** item in the **…** menu above
 the file list. The first time it fires, a toast points at both.
 
 ### Optional analysis layers
 
-Open **Settings → Analysis** to control Semantic Changes and Call Flow independently. A one-time review welcome presents the same two switches side by side. Disabling either layer avoids its analysis work and leaves the ordinary patch unchanged.
+**Semantic Changes** (the **Semantic diff** row in the left panel, and the **sem** count on each file) summarizes added, modified, moved, and deleted named entities in TypeScript, JavaScript, Python, Go, and Rust files, read by Plannotator's built-in engine in the browser. Files in other languages show the ordinary diff.
 
-**Semantic Changes** summarizes added, modified, moved, and deleted named entities. **Call Flow** compares CallDiff's inferred call trees across the exact before/after Git snapshots behind the current review. Call Flow is off by default and requires Node.js 22 or newer. Its toggle names the current review's languages and estimated footprint; enabling it consents to one background install of the roughly 5 MB pruned core plus only the needed grammar packs. A later missing language does not block installed ones: affected files are listed as skipped while support installs automatically, and analysis refreshes in the same session. Each target gets one automatic attempt per review session; failed targets expose a quiet Retry in the panel. When enabled, Call Flow appears in two places:
+Open **Settings → Analysis** to turn Call Flow on or off. Disabling it avoids its analysis work and leaves the ordinary patch unchanged. **Call Flow** compares CallDiff's inferred call trees across the exact before/after Git snapshots behind the current review. Call Flow is off by default and requires Node.js 22.18 or newer. Its toggle names the current review's languages and estimated footprint; enabling it consents to one background install of the roughly 5 MB pruned core plus only the needed grammar packs. A later missing language does not block installed ones: affected files are listed as skipped while support installs automatically, and analysis refreshes in the same session. Each target gets one automatic attempt per review session; failed targets expose a quiet Retry in the panel. When enabled, Call Flow appears in two places:
 
-- **Dock** — switch between expandable entry-path trees with source navigation and CallDiff's exact, copyable raw output.
+- **Dock** — switch between expandable entry-path trees with source navigation and CallDiff's exact, copyable raw output. Each entry path is a card. A row leads with the called function's name, and a green or red dot marks a new or removed call. Its `file:line` chip is strong when the call moves into another file and faint when it stays in the same file.
 - **Lens** — a compact `flow N` badge in each impacted file header, opening the complete inferred entry trees that contain a changed call in that file, plus a link to the full Dock.
 
 In either structured tree, use the comment action on a changed call to open Plannotator's ordinary code-review annotation toolbar without leaving Call Flow. The resulting file-and-line annotation appears in the diff and sidebar and follows the normal feedback and hosted-review submission path. Unchanged context rows remain available for navigation but cannot become inline diff comments.
@@ -278,9 +290,11 @@ Call Flow is syntactic and does not resolve types, imports, runtime dispatch, or
 
 ### Panel views
 
-The left panel has three views. **Tree** is the default. The tabs at the top are session-scoped — glancing at another view never changes your saved default (change that in Settings → Review).
+The left panel has three views. **Tree** is the default. At the very top, **Go to file…** opens Go to File (⌘P / Ctrl+P). The view tabs under it are session-scoped — glancing at another view never changes your saved default (change that in Settings → Review). Left and Right arrows move between the tabs; Enter or Space opens one.
 
-Under the tabs, the comparison reads as one sentence, for example **All changes ⌄ since main ⌄**: click the first words to pick which changes are shown, and the branch to pick what they are compared with. A long branch name keeps its start and end; hover it for the full name. Below that, **Changes** and **All files** switch the tree between the files this review changes and every file of the repository, and the search button opens Go to File (⌘P / Ctrl+P). The **All changes** row in the list opens every change of the review in one scrolling view.
+Under the tabs, the comparison reads as one sentence, for example **All changes ⌄ since main ⌄**: click the first words to pick which changes are shown, and the branch to pick what they are compared with. A long branch name keeps its start and end; hover it for the full name. The **All changes** row below opens every change of the review in one scrolling view.
+
+Above the files, a row that stays in view while you scroll holds **Changes** and **All files** (the files this review changes, or every file of the repository), Search in diff, Collapse all, and a **…** menu with Copy all diffs, Auto-mark viewed, Group by kind and the per-file Viewed and Git add buttons. Under it, the progress reads "0 of 12 viewed · 1 staged", with the eye that hides viewed files.
 
 - **Git status** — your changes grouped the way `git status` groups them: **Committed / Changes / Untracked**. Each row shows viewed state, a stage/unstage button, the change-type letter, and +/- counts. Only available with the "All changes" diff.
 - **Tree** (default) — the classic file tree over whichever diff type you've selected.
@@ -296,7 +310,7 @@ When an AI provider is available, the diff viewer includes inline AI chat. Selec
 
 ### Ask this session
 
-When the review was opened from Claude Code (with the [Plannotator mod](/docs/guides/claude-code/#the-plannotator-mod)), Pi, or OpenCode 2, Ask AI is answered by that agent session. It is the only option: there is no provider picker. Your question shows in the agent's chat. If the agent is busy, choose **Ask when it finishes** or **Interrupt and ask now**. In remote mode, from another Tailscale login than the computer owner's on a `--tailscale` session, from OpenCode 1, or with the Claude Code mod off, you pick a provider as described below. Review agents, Code Tour and Guided Review still run their own Claude or Codex models. See [Ask this session](/docs/guides/ai-features/#ask-this-session).
+When the review was opened from Claude Code (with the [Plannotator mod](/docs/guides/claude-code/#the-plannotator-mod)), Pi, or OpenCode 2, Ask AI is answered by that agent session. It is the only option: there is no provider picker. Your question shows in the agent's chat. If the agent is busy, choose **Ask when it finishes** or **Interrupt and ask now**. In remote mode, from OpenCode 1, or with the Claude Code mod off, you pick a provider as described below. Review agents, Code Tour and Guided Review still run their own Claude or Codex models. See [Ask this session](/docs/guides/ai-features/#ask-this-session).
 
 ### Supported providers
 
@@ -331,7 +345,7 @@ The same export is available from the command line — `plannotator guide list` 
 
 ## How review agents prompt the CLI
 
-The review agents (Claude, Codex, Code Tour, Guided Review) shell out to external CLIs — Claude and Codex natively, plus Cursor, OpenCode, Pi, and GitHub Copilot CLI as additional engines for review and guide jobs. Plannotator controls the user message and output schema; the CLI's own harness owns the system prompt. See the [Prompts reference](/docs/reference/prompts/) for the full breakdown of what each provider sends, how the pieces join, and which knobs you can tune per job.
+The review agents (Claude, Codex, Guided Review) shell out to external CLIs — Claude and Codex natively, plus Cursor, OpenCode, Pi, and GitHub Copilot CLI as additional engines for review and guide jobs. Plannotator controls the user message and output schema; the CLI's own harness owns the system prompt. See the [Prompts reference](/docs/reference/prompts/) for the full breakdown of what each provider sends, how the pieces join, and which knobs you can tune per job.
 
 ## Submitting feedback
 
@@ -403,7 +417,6 @@ restore a draft.
 | `/api/diff/fresh` | GET | Cheap staleness probe backing the "Diff out of date" notice |
 | `/api/commits` | GET | One page of the branch's linear history for the Commits panel |
 | `/api/fetch-base` | POST | Fetch the base branch's remote tracking ref ("Baseline is behind" banner) |
-| `/api/semantic-diff` | GET | Semantic diff for the active patch, when available |
 | `/api/file-content` | GET | Full file content for expandable diff context |
 | `/api/git-add` | POST | Stage or unstage a file |
 | `/api/feedback` | POST | Submit review feedback |
@@ -417,7 +430,7 @@ restore a draft.
 | `/api/ai/abort` | POST | Abort current AI query |
 | `/api/ai/permission` | POST | Respond to tool approval request |
 | `/api/agents/capabilities` | GET | Check available agent providers |
-| `/api/agents/jobs` | GET/POST/DELETE | Manage agent jobs (review, Code Tour, Guided Review) |
+| `/api/agents/jobs` | GET/POST/DELETE | Manage agent jobs (review, Guided Review) |
 | `/api/guide/:jobId` | GET | Fetch a completed Guided Review (sections, summaries, file refs) |
 | `/api/guide/:jobId/export` | GET | Download a guide (live id or `saved:{id}`) as one portable HTML file; `/export-info` returns its size and languages |
 | `/api/guide/:jobId/share` | POST/DELETE | Create a share link for a guide on the guide host (`{ public?, ttlSeconds? }`; encrypted unless `public`) or remove the recorded one; `/share-info` reports whether sharing is enabled, the host, and an existing link |

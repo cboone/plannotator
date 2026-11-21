@@ -141,12 +141,15 @@ switch (mode) {
   }
   case "inbox": {
     const { createInboxUpdates } = await import("../../packages/server/inbox-updates");
+    process.env.PLANNOTATOR_UPDATE_CHECK = "0";
     const inbox = createInboxUpdates({
       ...manual, version: manual.currentVersion, binaryPath: null, healthTickMs: 1000,
+      fetchReleasePage: unexpected, fetchRelease: unexpected,
       launchInstaller: unexpected, listSessions: () => [], onChange: () => {},
     });
     try {
-      assert.deepEqual(inbox.updateNow(), { outcome: "disabled" });
+      assert.deepEqual(await inbox.updateNow(), { outcome: "disabled" });
+      assert.deepEqual(await inbox.machineStart(), { outcome: "disabled" });
       const details = inbox.details();
       assert.equal(details.update, null);
       assert.equal(details.auto_update.supported, false);

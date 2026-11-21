@@ -33,7 +33,8 @@ import {
 	parseChecklist,
 	renderCompletedChecklist,
 } from "./generated/checklist.ts";
-import { loadConfig, resolveAgentTool, resolveUseJina } from "./generated/config.ts";
+import { loadConfig, resolveAgentTool, resolveAutoReload, resolveUseJina } from "./generated/config.ts";
+import { setupAutoReload } from "./auto-reload.ts";
 import { detectPiHost, setPiHost } from "./pi-host.ts";
 import { warnRuntimeTlsOnce } from "./runtime-tls.ts";
 import { importFresh, isPlannotatorUpdatedError, launchFailureText } from "./package-version.ts";
@@ -81,7 +82,7 @@ import {
 	type Phase,
 	stripPlanningOnlyTools,
 } from "./tool-scope.ts";
-import { getServerPorts, isRemoteSession } from "./server/network.ts";
+import { getServerPorts, isRemoteSession, isSshDetectedRemote } from "./server/network.ts";
 import { sessionOpenedMessage } from "./session-opened.ts";
 import {
 	claimSessionEventBus,
@@ -325,9 +326,17 @@ function sendUserMessageWithCurrentSessionFallback(
 	options: Parameters<ExtensionAPI["sendUserMessage"]>[1],
 	errorMessage: string,
 	origin: PiSessionIdentity,
+	/** The opener's `sessionAlive` latch: false once its `session_shutdown` ran. */
+	openerAlive: () => boolean,
 ): void {
-	if (trySendUserMessageToDifferentCurrentSession(content, options, errorMessage, origin)) return;
-
+	// A known-dead opener (/new, /resume: its session_shutdown ran, or its ctx
+	// throws) goes straight to the current session. A host whose replaced `pi`
+	// never throws would otherwise take the feedback into the dead session.
+	if (!openerAlive() || !isCtxAlive(ctx)) {
+		if (trySendUserMessageToDifferentCurrentSession(content, options, errorMessage, origin)) return;
+	}
+	// OMP subagents share the current-session slot while the opener is still live.
+	// Only redirect feedback if the opener can no longer accept it.
 	try {
 		pi.sendUserMessage(content, resolveIdleDeliveryOptions(ctx, options));
 		return;
@@ -442,9 +451,11 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 	// last, plan review). Listeners register once here; each command binds a bridge to its ctx.
 	const sessionBridgeHub = createPiSessionBridgeHub(pi);
 	// Off in remote mode: anyone who can reach the session URL could otherwise
-	// type into this agent session (same reasoning as the agent terminal).
+	// type into this agent session (same reasoning as the agent terminal). A
+	// remote session only SSH turned on keeps it, answered only for its own
+	// tunnel (the AI runtime's peer endpoints serve every other address).
 	const sessionBridgeFor = (ctx: ExtensionContext, origin: PiSessionIdentity) =>
-		isRemoteSession() ? undefined : sessionBridgeHub.createBridge(ctx, origin);
+		isRemoteSession() && !isSshDetectedRemote() ? undefined : sessionBridgeHub.createBridge(ctx, origin);
 	/**
 	 * The open reviews (tool, slash commands, plan review), each with a `pn-`
 	 * session id and the Pi session that opened it: what the `plannotator`
@@ -502,6 +513,7 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 	let sessionAlive = true;
 	/** The plan review waiting on the reviewer, if any (see PendingPlanReview). */
 	let pendingPlanReview: PendingPlanReview | null = null;
+	let planSessionGeneration = 0;
 	/** Resolved once per execution phase; undefined means widget-only. */
 	let todoProvider: TodoProvider | undefined;
 	/** Latch: no provider found, or one sync failed. Cleared on return to idle. */
@@ -1087,6 +1099,7 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 						{ deliverAs: "followUp" },
 						errors.send,
 						origin,
+						() => sessionAlive,
 					);
 					return;
 				}
@@ -1112,6 +1125,7 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 					{ deliverAs: "followUp" },
 					errors.send,
 					origin,
+					() => sessionAlive,
 				);
 			});
 			return { ok: true, review };
@@ -1416,6 +1430,8 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 				sessionBridgeFor(ctx, origin),
 				bundleFiles,
 				true,
+				// Returns at once: tab loss must not dismiss the review.
+				false,
 			);
 			ctx.ui.notify(sessionOpenedMessage("Annotation opened", session.url), "info");
 			const errors = {
@@ -1443,6 +1459,7 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 								{ deliverAs: "followUp" },
 								errors.send,
 								origin,
+								() => sessionAlive,
 							);
 						}
 						safeNotify(ctx, "Annotation approved.", "info", origin);
@@ -1477,6 +1494,7 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 					{ deliverAs: "followUp" },
 					errors.send,
 					origin,
+					() => sessionAlive,
 				);
 				if (outcome.notification === "approved") {
 					safeNotify(ctx, "Annotation approved.", "info", origin);
@@ -1520,6 +1538,8 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 				pickerMessages,
 				sessionBridgeFor(ctx, origin),
 				true,
+				// Returns at once: tab loss must not dismiss the review.
+				false,
 			);
 			ctx.ui.notify(sessionOpenedMessage("Last-message annotation opened", session.url), "info");
 			const errors = {
@@ -1544,6 +1564,7 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 								{ deliverAs: "followUp" },
 								errors.send,
 								origin,
+								() => sessionAlive,
 							);
 						}
 						safeNotify(ctx, "Message approved.", "info", origin);
@@ -1579,6 +1600,7 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 					{ deliverAs: "followUp" },
 					errors.send,
 					origin,
+					() => sessionAlive,
 				);
 				if (outcome.notification === "approved") {
 					safeNotify(ctx, "Message approved.", "info", origin);
@@ -2046,6 +2068,7 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 
 			currentPiSession.update(ctx);
 			const origin = getPiSessionIdentity(ctx);
+			const openingGeneration = planSessionGeneration;
 			let session: PlanReviewBrowserSession;
 			try {
 				session = await startPlanReview(ctx, planContent, undefined, {
@@ -2065,7 +2088,7 @@ export default function plannotator(pi: ExtensionAPI, deps: PlannotatorExtension
 			// Planning ended while this review was starting (an earlier review's
 			// approval settling during the await, or plan mode turned off): this
 			// review would be an orphan whose decision nobody delivers.
-			if (phase !== "planning") {
+			if (phase !== "planning" || openingGeneration !== planSessionGeneration) {
 				try {
 					// A tab that already loaded learns the review closed.
 					session.closeKeepingDraft?.();
@@ -2652,7 +2675,7 @@ Call ${PLAN_MARK_DONE_TOOL} immediately after each completed step and before the
 		persistState();
 	}
 
-	pi.on("session_start", async (_event, ctx) => {
+	function loadSessionConfig(ctx: ExtensionContext): void {
 		// Project trust gate (#1291). Capability absent = fail closed: the
 		// project-local config is skipped and the honest capability warning
 		// fires (see PROJECT_TRUST_CAPABILITY_WARNING). A host that provides
@@ -2673,6 +2696,10 @@ Call ${PLAN_MARK_DONE_TOOL} immediately after each completed step and before the
 		for (const warning of loadedConfig.warnings) {
 			ctx.ui.notify(`Plannotator config: ${warning}`, "warning");
 		}
+	}
+
+	pi.on("session_start", async (_event, ctx) => {
+		loadSessionConfig(ctx);
 		// A runtime without the Oct 2026 TLS fixes: one line per Pi start. It
 		// replaces the package's engines floor, which kept updates from installing (#902).
 		warnRuntimeTlsOnce((message) => ctx.ui.notify(message, "warning"));
@@ -2683,6 +2710,21 @@ Call ${PLAN_MARK_DONE_TOOL} immediately after each completed step and before the
 		}
 
 		await resyncPhaseFromSession(ctx, { phaseWhenUnrecorded: phase, warnOnPlanning: true });
+	});
+
+	// Oh My Pi reuses the extension when replacing the active session. The
+	// new branch owns its own phase; an open decision belongs to its opener.
+	if (piHost === "oh-my-pi") pi.on("session_switch" as "session_start", async (_event, ctx) => {
+		planSessionGeneration++;
+		stopPendingPlanReview();
+		lastSubmittedPath = null;
+		approvedPlanContent = null;
+		checklistItems = [];
+		justApprovedPlan = false;
+		todoProvider = undefined;
+		todoProviderDisabled = false;
+		loadSessionConfig(ctx);
+		await resyncPhaseFromSession(ctx, { phaseWhenUnrecorded: "idle", warnOnPlanning: true });
 	});
 
 	// Compaction summarizes conversation history and can swallow the delivered
@@ -2710,9 +2752,34 @@ Call ${PLAN_MARK_DONE_TOOL} immediately after each completed step and before the
 		});
 	});
 
-	// The Plannotator Inbox (`plannotator_inbox` and the reply wake, inbox.ts):
-	// only where the inbox tool switch allows it for Pi and an Inbox was found.
-	// Pi awaits the extension factory, so the tool list is read (bounded) before
-	// the session's first request; otherwise this returns nothing.
-	return setupPiInbox(pi, { isAskActive: () => sessionBridgeHub.hasActiveAsk });
+	// Pi reloads itself, when nothing can be lost, to load an updated Plannotator
+	// (auto-reload.ts); off, an older Pi and Oh My Pi get the note once per version.
+	const autoReload = setupAutoReload(pi, {
+		host: piHost,
+		enabled: resolveAutoReload(loadConfig(), process.env),
+		plannotatorBusy: () => {
+			if (pendingPlanReview) return "a plan review";
+			if (openReviews.openAll().length > 0) return "an open review";
+			if (sessionBridgeHub.hasActiveAsk) return "an Ask question";
+			return null;
+		},
+		piVersion: async () => {
+			try {
+				const sdk = (await import("@earendil-works/pi-coding-agent")) as { VERSION?: unknown };
+				return typeof sdk.VERSION === "string" ? sdk.VERSION : null;
+			} catch {
+				return null;
+			}
+		},
+	});
+	// The Plannotator Inbox (inbox.ts): where an Inbox was found, the session
+	// claim (which session this Pi runs, the tool on or off); and the
+	// `plannotator_inbox` tool and the reply wake only where the inbox tool
+	// switch allows it for Pi. Pi awaits the extension factory, so the tool list
+	// is read (bounded) before the session's first request; otherwise this
+	// returns nothing.
+	return setupPiInbox(pi, {
+		isAskActive: () => sessionBridgeHub.hasActiveAsk,
+		claimUpdateNotice: (version) => autoReload.claimNotice(version),
+	});
 }

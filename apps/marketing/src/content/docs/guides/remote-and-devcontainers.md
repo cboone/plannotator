@@ -24,11 +24,13 @@ Remote mode changes these behaviors:
 3. **Wider bind** — The server listens on every interface (`0.0.0.0`), not only loopback, so a forwarder or another device can reach it
 4. **These features are turned off** — Ask AI's "Ask this session" (Ask AI uses a separate AI agent instead), the annotate agent terminal (unless `PLANNOTATOR_AGENT_TERMINAL_REMOTE=1`), Open in, Update now from a review window, live app annotation, the agent closing a review it opened, and auto-dismiss of an abandoned `--gate --json` session
 
-Every other route stays reachable by anyone who can reach the URL: approving or denying the plan, sending feedback, starting agent review jobs, staging files, posting to the pull request, saving Edit Mode changes, and Ask AI with a separate agent. Bind or forward the port only on networks you trust. Use remote mode only when the browser cannot reach the machine's loopback address; `PLANNOTATOR_PORT` works in local mode too.
+Every other route stays reachable by anyone who can reach the URL: approving or denying the plan, sending feedback, starting agent review jobs, staging files, posting to the pull request, saving Edit Mode changes, and Ask AI with a separate agent. In remote mode the server listens on every interface (`0.0.0.0`) with no login, so anyone who can reach the port can use it, even when you use an SSH tunnel. Keep the port closed to networks you don't trust. Use remote mode only when the browser cannot reach the machine's loopback address; `PLANNOTATOR_PORT` works in local mode too.
 
 ### Legacy detection
 
 Plannotator also detects `SSH_TTY` and `SSH_CONNECTION` environment variables for automatic remote mode when `PLANNOTATOR_REMOTE` is unset. Use `PLANNOTATOR_REMOTE=1` / `true` to force remote mode or `PLANNOTATOR_REMOTE=0` / `false` to force local mode.
+
+When remote mode is on only because of SSH (`PLANNOTATOR_REMOTE` unset), the server listens and advertises exactly as above, and a request that reaches it over loopback (your own `ssh -L` tunnel or editor port forward, or a browser on that machine) gets what a local session gives: Ask this session, link hover cards, the annotate agent terminal, and documents outside the project. A request from any other address gets what remote mode gives. Open in, opening a browser and live app annotation stay off over SSH. `PLANNOTATOR_REMOTE=1` keeps remote mode whole for every request.
 
 ## WSL2
 
@@ -49,7 +51,9 @@ Plannotator then advertises `http://my-machine.tailnet.ts.net:<port>` (the port 
 
 Note that the session is served over plain `http`, so some in-app features that require a secure context (such as creating short share links from the UI) are unavailable from other devices unless you put the session behind HTTPS (e.g. `tailscale serve`). The core review, annotate, and approve flows work over plain `http`.
 
-`plannotator review --tailscale` (also `annotate` and `last`) does that for you: it publishes the session over your tailnet with `tailscale serve`, over HTTPS and never publicly. It needs Tailscale Serve and HTTPS certificates turned on for your tailnet, a setting in Tailscale's admin console. If it is off, Plannotator says so and prints Tailscale's link to turn it on: a one-time page where you keep "HTTPS certificates" ticked and press **Enable HTTPS** (Funnel is not needed). The same command without `--tailscale` still works on this computer.
+`plannotator review --tailscale` (also `annotate` and `last`) does that for you: it publishes the session over your tailnet with `tailscale serve`, over HTTPS and never publicly. It opens only for the Tailscale account that owns this computer; any other account gets a page saying so. If Tailscale cannot say who owns the computer (a tagged machine), name your login in `inboxTailscaleAllow` in `~/.plannotator/config.json`, or the session does not start. On a Mac the Tailscale app is enough: you do not need to turn on its command-line tool. It needs Tailscale Serve and HTTPS certificates turned on for your tailnet, a setting in Tailscale's admin console. If it is off, Plannotator says so and prints Tailscale's link to turn it on: a one-time page where you keep "HTTPS certificates" ticked and press **Enable HTTPS** (Funnel is not needed). The same command without `--tailscale` still works on this computer.
+
+To publish every session this way without passing the flag (for example, so your agent does not have to), set `PLANNOTATOR_TAILSCALE=1`, or add `"tailscale": true` to `~/.plannotator/config.json`. `PLANNOTATOR_TAILSCALE=0` runs one session locally again.
 
 ## HTTPS reverse proxies
 
@@ -110,20 +114,20 @@ If the automatic `BROWSER` detection doesn't work for your setup, you can fall b
 
 ## SSH port forwarding
 
-For direct SSH connections, forward the port in your `~/.ssh/config`:
+For direct SSH connections, forward the port in your `~/.ssh/config` (`PLANNOTATOR_PORT` if set, otherwise `19432`):
 
 ```
 Host your-server
-    LocalForward 9999 localhost:9999
+    LocalForward 19432 localhost:19432
 ```
 
 Or forward ad-hoc when connecting:
 
 ```bash
-ssh -L 9999:localhost:9999 your-server
+ssh -L 19432:localhost:19432 your-server
 ```
 
-Then open `http://localhost:9999` locally if Plannotator does not open a browser for you.
+Then open `http://localhost:19432` locally (your `PLANNOTATOR_PORT` if set) if Plannotator does not open a browser for you.
 
 ## Docker (without VS Code)
 

@@ -18,7 +18,6 @@
  *    rule "call read_thread with no id and match the subject" checks. A list
  *    a connection reads for the session-start text (`_meta` peek) does not
  *    count: the agent did not choose to check.
- *  - wait_for_reply returning a reply (or a 👍) in that thread;
  *  - the person's reply or message delivered to this session (the wake, a
  *    Codex queue), read from the store's delivery records;
  *  - the session's own earlier message in the thread (it wrote there, so it
@@ -73,7 +72,7 @@ const msOf = (iso: string | null | undefined): number | null => {
 
 const later = (a: number | null, b: number | null): number | null => (a === null ? b : b === null ? a : Math.max(a, b));
 
-/** When `session` last read the thread: read_thread, wait_for_reply, or a delivery of the person's words to it. */
+/** When `session` last read the thread: read_thread, or a delivery of the person's words to it. */
 function lastRead(store: InboxStore, session: string, messages: readonly InboxMessage[], threadId: string): number | null {
   let last = readsByStore.get(store)?.get(keyOf(session, threadId)) ?? null;
   for (const message of messages) {
@@ -145,4 +144,19 @@ export function staleThreadText(stale: StaleThread, time: (iso: string) => strin
       ? `You last wrote in this thread at ${time(contact)}`
       : `You have not read this thread ${stale.last_read_at ? `since ${time(stale.last_read_at)}` : "in this session"}`;
   return `${lead}; its subject is ${subject}${name}.`;
+}
+
+/**
+ * When `session` last saw the thread's state, as ISO (approval
+ * "inbox-pr-binding": the wake says what the person changed in the thread's
+ * PRs since then): a read of it, a delivery of the person's words to it, or
+ * its own message there. Null for never.
+ */
+export function sessionLastSawThread(store: InboxStore, session: string, threadId: string): string | null {
+  const messages = store.thread(threadId)?.messages ?? [];
+  let seen = lastRead(store, session, messages, threadId);
+  for (const message of messages) {
+    if (message.author.kind === "agent" && message.author.session === session) seen = later(seen, msOf(message.created_at));
+  }
+  return seen === null ? null : new Date(seen).toISOString();
 }
