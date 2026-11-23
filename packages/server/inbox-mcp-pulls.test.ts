@@ -57,6 +57,15 @@ function world(projectHost?: InboxPullsMcpContext["projectHost"]) {
 const textOf = (result: Result) => result.content.map((c) => c.text).join("\n");
 
 describe("thread_pulls", () => {
+  test("adding a PR leaves the thread's snooze running", async () => {
+    const w = world();
+    w.store.setSnooze(w.thread, "2026-11-08T11:00:00.000Z");
+    const result = await w.call({ thread_id: w.thread, add: ["o/r#1"], ...FILLED });
+    expect(result.isError).toBeUndefined();
+    expect(w.store.threadPulls(w.thread)).toHaveLength(1);
+    expect(w.store.snoozedThreads()).toEqual(new Set([w.thread]));
+  });
+
   test("an agent in the thread adds PRs: the answer says what changed and that nothing was sent, with each PR's state", async () => {
     const w = world();
     const result = await w.call({ thread_id: w.thread, add: ["o/r#1", "https://gitlab.com/acme/api/-/merge_requests/7"], ...FILLED });

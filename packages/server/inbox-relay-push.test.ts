@@ -197,19 +197,26 @@ test("push 2: the badge counts the rows waiting on the person, a snoozed thread 
   w.store.sendMessage({ project_id: w.project.id, author: AGENT, body: QUESTION("Bump the SDK?") });
   expect((await w.nextPush(1)).summary.badge).toBe(2);
 
-  w.store.setSnooze(first.thread_id, new Date(Date.now() + 3_600_000).toISOString());
+  const until = new Date(Date.now() + 3_600_000).toISOString();
+  w.store.setSnooze(first.thread_id, until);
   w.store.sendMessage({ project_id: w.project.id, author: AGENT, body: QUESTION("And a 429?"), reply_to: first.id });
-  w.store.sendMessage({ project_id: w.project.id, author: AGENT, body: "The turn failed.", reply_to: first.id, turn_error: true });
+  expect(w.store.snoozedThreads().has(first.thread_id)).toBe(false);
+  const woke = await w.nextPush(2);
+  expect(woke.summary.question.prompt).toBe("And a 429?");
+  expect(woke.summary.badge).toBe(2);
+
+  w.store.setSnooze(first.thread_id, until);
+  w.store.sendMessage({ project_id: w.project.id, author: AGENT, body: "The turn failed.", reply_to: first.id, launch_note: true, turn_error: true });
   w.store.sendMessage({ project_id: w.project.id, author: AGENT, body: QUESTION("Pin the Node version?") });
-  const third = await w.nextPush(2);
-  // The snoozed thread's question and failed turn sent nothing, and it is not in the count.
-  expect(w.pushes.length).toBe(3);
-  expect(third.summary.question.prompt).toBe("Pin the Node version?");
-  expect(third.summary.badge).toBe(2);
+  const other = await w.nextPush(3);
+  // The snoozed thread's failed turn sent nothing. Its open question is left out of the count.
+  expect(w.pushes.length).toBe(4);
+  expect(other.summary.question.prompt).toBe("Pin the Node version?");
+  expect(other.summary.badge).toBe(2);
 
   w.store.endSnooze(first.thread_id);
   w.store.sendMessage({ project_id: w.project.id, author: AGENT, body: QUESTION("Still retry a 409?"), reply_to: first.id });
-  const back = await w.nextPush(3);
+  const back = await w.nextPush(4);
   expect(back.summary.thread_id).toBe(first.thread_id);
   expect(back.summary.badge).toBe(3);
 });
@@ -316,21 +323,21 @@ test("a snoozed thread that comes back with a question open pushes it once, as t
   const w = await world();
   const asks = w.store.sendMessage({ project_id: w.project.id, author: AGENT, body: QUESTION("Retry a 409?") }).message;
   await w.nextPush(0);
+  w.store.sendMessage({ project_id: w.project.id, author: AGENT, body: QUESTION("And a 429?"), reply_to: asks.id });
+  await w.nextPush(1);
   // A thread that asks nothing (and, to this phone with no topic, pushed nothing).
   const quiet = w.store.sendMessage({ project_id: w.project.id, author: AGENT, subject: "Notes", body: "Nothing to decide." }).message;
-  // Far enough ahead that a slow runner still sees the thread snoozed when the second question is written.
   const until = new Date(Date.now() + 2_000).toISOString();
   w.store.setSnooze(asks.thread_id, until);
   w.store.setSnooze(quiet.thread_id, until);
-  w.store.sendMessage({ project_id: w.project.id, author: AGENT, body: QUESTION("And a 429?"), reply_to: asks.id });
-  expect(await w.settled()).toBe(1);
-  const back = await w.nextPush(1, 10_000);
+  expect(await w.settled()).toBe(2);
+  const back = await w.nextPush(2, 10_000);
   expect(back.summary).toMatchObject({ kind: "question", thread_id: asks.thread_id });
   expect(back.summary.question.prompt).toBe("And a 429?");
   expect(back.collapse_id).toBe(w.collapseOf(asks.thread_id));
   // Once per return, and nothing for the thread with no question open.
   await Bun.sleep(300);
-  expect(w.pushes.length).toBe(2);
+  expect(w.pushes.length).toBe(3);
 }, 20_000);
 
 test("a withdrawal that asks nothing pushes on the thread's collapse id with no question; plain news still does not", async () => {

@@ -191,6 +191,18 @@ describe("agents", () => {
     expect(w.server.store.scheduledThread(id)).toMatchObject({ enabled: false, approved_at: null });
     expect((await w.call({ op: "on", id })).content[0]!.text).toStartWith("routine_not_approved:");
   });
+
+  test("an agent's routine edit leaves the thread snoozed", async () => {
+    const w = await world();
+    await w.setOn(true);
+    const made = await w.call({ op: "create", name: "Morning triage", prompt: "Triage.", schedule: null, agent: FAKE, thread_id: w.thread });
+    const id = made.structuredContent!.scheduled.id as string;
+    w.server.store.setSnooze(w.thread, new Date(Date.now() + 3_600_000).toISOString());
+    const edited = await w.call({ op: "update", id, prompt: "Triage new issues.", thread_id: w.thread });
+    expect(edited.isError).toBeUndefined();
+    expect(w.lines().at(-1)!.scheduled_change).toMatchObject({ scheduled_id: id, op: "update" });
+    expect(w.server.store.snoozedThreads()).toEqual(new Set([w.thread]));
+  });
 });
 
 describe("the window's editor", () => {

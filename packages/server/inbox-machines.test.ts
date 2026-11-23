@@ -1356,6 +1356,36 @@ describe("an agent's snooze_thread of a linked machine's thread", () => {
   const snoozedIds = async (port: number) => ((await list(port)).snoozed as Json[]).map((row) => row.thread_id);
   const rowOn = async (port: number, id: string) => JSON.stringify(((await list(port)).sections as Json[]).flatMap((s) => s.threads)).includes(id);
 
+  test("an agent's message ends a snooze on its home Inbox and returns the thread on both linked Inboxes", async () => {
+    const a = await start(scratch("plannotator-unsnooze-a-"));
+    const b = await start(scratch("plannotator-unsnooze-b-"));
+    const clients: Client[] = [];
+    try {
+      const offered = (await (await fetch(`http://127.0.0.1:${b.port}/api/inbox/machines/offer`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })).json()) as Json;
+      const linked = await fetch(`http://127.0.0.1:${a.port}/api/inbox/machines/link`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ link: offered.link, address: `http://127.0.0.1:${b.port}`, back: `http://127.0.0.1:${a.port}` }) });
+      expect(linked.status).toBe(201);
+      for (const [home, viewer] of [[a, b], [b, a]] as const) {
+        const agent = await mcp(home.port);
+        clients.push(agent);
+        const project = scratch("plannotator-unsnooze-project-");
+        const send = (body: string, reply_to?: string) => agent.callTool({ name: "send_message", arguments: { project_path: project, agent_session: "ses_agent", body, ...(reply_to ? { reply_to } : {}) } });
+        const root = await send("Plain news");
+        expect(root.isError).toBeUndefined();
+        const { thread_id, message_id } = root.structuredContent as { thread_id: string; message_id: string };
+        home.store.setSnooze(thread_id, inSoon());
+        await waitFor("the snoozed thread on the linked Inbox", async () => (await snoozedIds(viewer.port)).includes(thread_id));
+        expect((await send("More news", message_id)).isError).toBeUndefined();
+        expect(await rowOn(home.port, thread_id)).toBe(true);
+        await waitFor("the thread back on the linked Inbox", () => rowOn(viewer.port, thread_id));
+        expect(await snoozedIds(viewer.port)).not.toContain(thread_id);
+      }
+    } finally {
+      for (const client of clients) await client.close().catch(() => {});
+      a.stop();
+      b.stop();
+    }
+  });
+
   test("the agent on A snoozes B's thread: it lives on B, leaves A's list, and ends; B away, the call says it waits, and it applies when B is back", async () => {
     const dataA = scratch("plannotator-snooze-agent-a-");
     const dataB = scratch("plannotator-snooze-agent-b-");

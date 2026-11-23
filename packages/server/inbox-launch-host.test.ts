@@ -139,6 +139,18 @@ describe("a thread note quoting an agent", () => {
     expect(lines.join("\n")).toContain("the disk is full");
     expect(changed).toEqual(["changed"]);
   });
+
+  test("launch and cancellation notes leave a running snooze", () => {
+    const { store, project } = setup();
+    const author = { kind: "agent" as const, host: FAKE, session: "s1", name: "Fake Agent" };
+    const root = store.sendMessage({ project_id: project.id, author, body: "First update." }).message;
+    store.setSnooze(root.id, new Date(Date.now() + 3_600_000).toISOString());
+    for (const body of ["The turn failed.", "The launch was cancelled."]) {
+      writeLaunchNote({ store, onChange: () => {} }, root, { author, body, key: body, turnError: body === "The turn failed." }, (line) => { throw new Error(line); });
+      expect(store.message(store.threadMessageIds(root.id).at(-1)!)).toMatchObject({ body, launch_note: true });
+      expect(store.snoozedThreads()).toEqual(new Set([root.id]));
+    }
+  });
 });
 
 describe("a second agent behind LaunchHost", () => {
